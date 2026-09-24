@@ -2,26 +2,35 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { entrySeconds, fmtClock } from "@/lib/format";
+import { entrySeconds } from "@/lib/format";
 import {
+  fetchRunningTimer,
+  startSettled,
   startTimer,
   stopRunningTimer,
   updateRunningEntry,
+  OPTIMISTIC_ID,
   TIMER_CHANGED_EVENT,
+  type TimerChangedDetail,
 } from "@/lib/timer";
+import { toast } from "@/lib/toast";
 import ProjectPicker, { ProjectDot } from "@/components/ProjectPicker";
 import NotificationsBell from "@/components/NotificationsBell";
 import FocusMode from "@/components/FocusMode";
-import type { Project, TimeEntry } from "@/lib/types";
+import ElapsedClock from "@/components/ElapsedClock";
+import type { Project, TimeEntry, Workspace } from "@/lib/types";
 
 /** Rozdělaná focus seance: co měřit dál po pauze + sečtené dřívější úseky. */
 type PausedFocus = {
+  workspace_id: string;
   project_id: string | null;
   task_id: string | null;
   title: string;
   description: string;
   projectName: string | null;
   accum: number;
+  /** uložený záznam pozastaveného úseku — popis dopsaný v pauze jde do něj */
+  entryId: string | null;
 };
 
 /** Odlehčený úkol pro našeptávač v liště. */
@@ -32,71 +41,143 @@ type TaskLite = {
   projects: { name: string } | null;
 };
 
+type EntryPatch = { project_id?: string | null; description?: string };
+
+// neověřený stav timeru zkoušet načíst znovu: 5 s, 15 s, 30 s, pak po minutě
+const RETRY_MS = [5_000, 15_000, 30_000, 60_000];
+// start a stop jsou jedno tlačítko na stejném místě — druhý klik dvojkliku
+// by hned přepnul zpátky (stop → nový timer, start → minutový záznam)
+const TOGGLE_GUARD_MS = 500;
+
 export default function TimerBar({
   wsId,
   userId,
+  workspaces = [],
   noTimer = false,
 }: {
   wsId: string;
   userId: string;
+  /** mé firmy — když timer běží v jiné firmě, lišta to řekne */
+  workspaces?: Workspace[];
   /** výkaz v %: bez timeru — lišta nese jen zvoneček */
   noTimer?: boolean;
 }) {
   const supabase = createClient();
   const [running, setRunning] = useState<TimeEntry | null>(null);
+  // stav se nepodařilo ověřit (síť / přihlášení) — ukazujeme poslední známý
+  const [syncProblem, setSyncProblem] = useState<"network" | "auth" | null>(null);
+  const [retryN, setRetryN] = useState(0);
   const [projects, setProjects] = useState<Project[]>([]);
   const [description, setDescription] = useState("");
   const [idleProject, setIdleProject] = useState("");
   const [busy, setBusy] = useState(false);
-  const [, setTick] = useState(0);
   // našeptávač přiřazených úkolů
   const [myTasks, setMyTasks] = useState<TaskLite[]>([]);
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [highlight, setHighlight] = useState(-1);
   const suggestRef = useRef<HTMLDivElement>(null);
-  // start/stop probíhá — blokuje dvojklik i externí reload, aby optimistický
-  // stav nepřeblikával. Ref (ne state), ať ho vidí i listenery bez re-subscribe.
+  // start/stop/pauza probíhá — jedna akce naráz. Ref (ne state), ať ho vidí
+  // i listenery bez re-subscribe.
   const busyRef = useRef(false);
+  // pořadí načítání: odpověď staršího load() nesmí přepsat novější stav
+  // (načítání po focusu okna → klik na Stop → pozdní odpověď „běží")
+  const loadSeq = useRef(0);
+  const lastLoadAt = useRef(0);
+  const authFails = useRef(0);
+  const authToastShown = useRef(false);
+  // během akce přišel podnět k přenačtení — provede se po ní
+  const reloadAfterBusy = useRef(false);
+  // Stop kliknutý během rozběhu startu nesmí propadnout — provede se po něm
+  const stopQueued = useRef(false);
+  const toggledAt = useRef(0);
+  // změna projektu/popisu dřív, než server vrátí id nového záznamu
+  const pendingPatch = useRef<EntryPatch | null>(null);
+  const tasksLoadedAt = useRef(0);
   // focus mode (iPad): fullscreen s velkým časem, pauzou a stopem
   const [focusOpen, setFocusOpen] = useState(false);
   const [pausedFocus, setPausedFocus] = useState<PausedFocus | null>(null);
 
   const load = useCallback(async () => {
-    const { data } = await supabase
-      .from("time_entries")
-      .select("*, tasks(title), projects(name)")
-      .eq("user_id", userId)
-      .is("stopped_at", null)
-      .maybeSingle();
-    setRunning((data as TimeEntry) ?? null);
+    const seq = ++loadSeq.current;
+    lastLoadAt.current = Date.now();
+    const res = await fetchRunningTimer(supabase, userId);
+    if (seq !== loadSeq.current) return; // mezitím novější načtení nebo akce
+    if (res.ok) {
+      authFails.current = 0;
+      setSyncProblem(null);
+      setRetryN(0);
+      setRunning(res.running);
+      return;
+    }
+    // chyba ≠ „nic neběží": necháme poslední známý stav a zkusíme znovu
+    setSyncProblem(res.auth ? "auth" : "network");
+    setRetryN((n) => n + 1);
+    authFails.current = res.auth ? authFails.current + 1 : 0;
+    // jedno selhání může být jen souběh s obnovou tokenu — hlásit až opakované
+    if (authFails.current >= 2 && !authToastShown.current) {
+      authToastShown.current = true;
+      toast("Přihlášení vypršelo — obnov prosím stránku (F5).", "error");
+    }
   }, [supabase, userId]);
 
+  // opakované načtení po chybě (každý neúspěch naplánuje další pokus)
   useEffect(() => {
-    load();
-    // reload při vlastní změně timeru i při návratu na stránku. Pokrýváme
-    // focus (přepnutí okna), visibilitychange (přepnutí tabu) a pageshow
-    // (obnova z bfcache — mobilní tlačítko Zpět). Během vlastního start/stop
-    // reload přeskočíme, ať optimistický stav nepřebliká zpět.
-    const onChange = () => {
-      if (busyRef.current) return;
-      load();
-    };
-    const onVisible = () => {
-      if (document.visibilityState === "visible") onChange();
-    };
-    window.addEventListener(TIMER_CHANGED_EVENT, onChange);
-    window.addEventListener("focus", onChange);
-    window.addEventListener("pageshow", onChange);
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.removeEventListener(TIMER_CHANGED_EVENT, onChange);
-      window.removeEventListener("focus", onChange);
-      window.removeEventListener("pageshow", onChange);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [load]);
+    if (retryN === 0) return;
+    const id = setTimeout(
+      () => load(),
+      RETRY_MS[Math.min(retryN - 1, RETRY_MS.length - 1)]
+    );
+    return () => clearTimeout(id);
+  }, [retryN, load]);
 
   useEffect(() => {
+    if (noTimer) return;
+    load();
+    // Přenačíst při změně timeru jinde (karta, Můj čas) i při návratu na
+    // stránku: focus (přepnutí okna), visibilitychange (tab), pageshow
+    // (bfcache — mobilní Zpět), online (síť zase naskočila).
+    const refresh = () => {
+      // během vlastní akce počkat — její výsledek je čerstvější než reload
+      if (busyRef.current) {
+        reloadAfterBusy.current = true;
+        return;
+      }
+      // focus a visibilitychange chodí při přepnutí tabu spolu
+      if (Date.now() - lastLoadAt.current < 1000) return;
+      load();
+    };
+    const onTimerChanged = (e: Event) => {
+      const detail = (e as CustomEvent<TimerChangedDetail>).detail;
+      if (detail && "running" in detail) {
+        // stav přímo z právě proběhlé akce (start/stop) — bez dotazu
+        loadSeq.current++;
+        setSyncProblem(null);
+        setRetryN(0);
+        setRunning(detail.running ?? null);
+        return;
+      }
+      if (busyRef.current) reloadAfterBusy.current = true;
+      else load();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener(TIMER_CHANGED_EVENT, onTimerChanged);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("pageshow", refresh);
+    window.addEventListener("online", refresh);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener(TIMER_CHANGED_EVENT, onTimerChanged);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("pageshow", refresh);
+      window.removeEventListener("online", refresh);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [load, noTimer]);
+
+  useEffect(() => {
+    if (noTimer) return;
     supabase
       .from("projects")
       .select("*")
@@ -104,19 +185,23 @@ export default function TimerBar({
       .eq("archived", false)
       .order("position")
       .order("name")
-      .then(({ data }) => setProjects((data as Project[]) ?? []));
+      .then(({ data, error }) => {
+        if (!error) setProjects((data as Project[]) ?? []);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsId]);
+  }, [wsId, noTimer]);
 
   // úkoly přiřazené přihlášenému uživateli — zdroj pro našeptávač
   const loadMyTasks = useCallback(async () => {
-    const { data } = await supabase
+    tasksLoadedAt.current = Date.now();
+    const { data, error } = await supabase
       .from("task_assignees")
       .select("tasks!inner(id, title, project_id, projects(name))")
       .eq("user_id", userId)
       .eq("tasks.workspace_id", wsId)
       .is("tasks.completed_at", null)
       .is("tasks.parent_id", null);
+    if (error) return; // necháme poslední seznam
     const tasks = ((data ?? []) as unknown as { tasks: TaskLite }[])
       .map((r) => r.tasks)
       .sort((a, b) => a.title.localeCompare(b.title, "cs"));
@@ -124,11 +209,9 @@ export default function TimerBar({
   }, [supabase, wsId, userId]);
 
   useEffect(() => {
+    if (noTimer) return;
     loadMyTasks();
-    const onChange = () => loadMyTasks();
-    window.addEventListener(TIMER_CHANGED_EVENT, onChange);
-    return () => window.removeEventListener(TIMER_CHANGED_EVENT, onChange);
-  }, [loadMyTasks]);
+  }, [loadMyTasks, noTimer]);
 
   // zavření našeptávače kliknutím mimo
   useEffect(() => {
@@ -140,46 +223,69 @@ export default function TimerBar({
     return () => document.removeEventListener("mousedown", onDown);
   }, [suggestOpen]);
 
-  useEffect(() => {
-    if (!running) return;
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
-  }, [running]);
-
-  // popis editujeme lokálně, do DB se ukládá až na blur/Enter
+  // popis editujeme lokálně, do DB se ukládá na blur/Enter a se zastavením
   const runningId = running?.id;
   useEffect(() => {
     setDescription(running?.description ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runningId]);
 
-  const isTaskEntry = !!running?.task_id;
+  // timer spuštěný v jiné firmě: jen ukázat (projekty v pickeru jsou zdejší)
+  const foreignWsName =
+    running && running.workspace_id !== wsId
+      ? (workspaces.find((w) => w.id === running.workspace_id)?.name ?? "jiná firma")
+      : null;
+  const readOnlyEntry = !!running && (!!running.task_id || !!foreignWsName);
 
-  async function start() {
-    if (busyRef.current || running) return;
+  // --------------------------------------------------------------- akce
+
+  /** Jedna akce naráz. Po ní zařazený Stop, jinak odložený reload. */
+  async function exclusive(action: () => Promise<void>) {
+    if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
+    try {
+      await action();
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+    if (stopQueued.current) {
+      stopQueued.current = false;
+      await exclusive(() => doStop(undefined, null));
+    } else if (reloadAfterBusy.current) {
+      reloadAfterBusy.current = false;
+      load();
+    }
+  }
+
+  /** dvojklik na přepínací tlačítko — druhý klik zahodit */
+  function toggleGuard(): boolean {
+    if (Date.now() - toggledAt.current < TOGGLE_GUARD_MS) return false;
+    toggledAt.current = Date.now();
+    return true;
+  }
+
+  async function flushPendingPatch(entry: TimeEntry | null) {
+    const patch = pendingPatch.current;
+    pendingPatch.current = null;
+    if (patch && entry) await updateRunningEntry(supabase, entry.id, patch);
+  }
+
+  async function start() {
+    if (running || busyRef.current || !toggleGuard()) return;
     const projectId = idleProject || null;
-    // optimisticky přepni na „běží" hned, ať má uživatel okamžitou odezvu
-    setRunning({
-      id: "optimistic",
-      workspace_id: wsId,
-      user_id: userId,
-      project_id: projectId,
-      task_id: null,
-      description: description.trim(),
-      started_at: new Date().toISOString(),
-      stopped_at: null,
-    } as unknown as TimeEntry);
-    await startTimer(supabase, userId, {
-      workspace_id: wsId,
-      project_id: projectId,
-      description: description.trim(),
+    const desc = description.trim();
+    await exclusive(async () => {
+      const res = await startTimer(supabase, userId, {
+        workspace_id: wsId,
+        project_id: projectId,
+        project_name: projects.find((p) => p.id === projectId)?.name ?? null,
+        description: desc,
+      });
+      if (res.ok) setIdleProject("");
+      await flushPendingPatch(res.running);
     });
-    setIdleProject("");
-    await load(); // sesynchronizuj skutečný záznam (id, přesný started_at)
-    busyRef.current = false;
-    setBusy(false);
   }
 
   // spustí timer rovnou na vybraném přiřazeném úkolu
@@ -187,43 +293,76 @@ export default function TimerBar({
     setSuggestOpen(false);
     setHighlight(-1);
     if (busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
     setDescription("");
-    setRunning({
-      id: "optimistic",
-      workspace_id: wsId,
-      user_id: userId,
-      project_id: task.project_id,
-      task_id: task.id,
-      description: "",
-      started_at: new Date().toISOString(),
-      stopped_at: null,
-      tasks: { title: task.title },
-      projects: task.projects,
-    } as unknown as TimeEntry);
-    await startTimer(supabase, userId, {
-      workspace_id: wsId,
-      project_id: task.project_id,
-      task_id: task.id,
-      task_title: task.title,
+    await exclusive(async () => {
+      const res = await startTimer(supabase, userId, {
+        workspace_id: wsId,
+        project_id: task.project_id,
+        task_id: task.id,
+        task_title: task.title,
+        project_name: task.projects?.name ?? null,
+      });
+      if (res.ok) setIdleProject("");
+      await flushPendingPatch(res.running);
     });
-    setIdleProject("");
-    await load();
-    busyRef.current = false;
-    setBusy(false);
   }
 
-  async function stop() {
-    if (busyRef.current || !running) return;
-    busyRef.current = true;
-    setBusy(true);
-    setRunning(null); // optimisticky; při chybě to load() vrátí zpět
+  async function doStop(desc: string | undefined, prev: TimeEntry | null) {
+    await startSettled(); // ▶ na kartě ještě dobíhá — zastavit až NOVÝ záznam
+    loadSeq.current++; // rozjeté načítání by po odpovědi vrátilo „běží"
+    setRunning(null); // optimisticky
     setPausedFocus(null); // stop ukončuje i rozdělanou focus seanci
-    await stopRunningTimer(supabase, userId);
-    await load();
-    busyRef.current = false;
-    setBusy(false);
+    pendingPatch.current = null;
+    const res = await stopRunningTimer(supabase, userId, { description: desc });
+    if (!res.ok && prev) setRunning(prev); // vrátit; přesný stav dotáhne reload
+  }
+
+  /** Stop z lišty i z focus módu. `note` = text z focus módu; jinak se bere
+      nedopsaný popis z pole v liště (klepnutí na tlačítko na iPadu pole
+      nemusí opustit, takže by blur s uložením nepřišel). */
+  function stop(note?: string, fromToggle = false) {
+    if (!running) return;
+    // druhý klik dvojkliku na ▶ — přistál by na ■ na stejném místě
+    if (fromToggle && !toggleGuard()) return;
+    if (busyRef.current) {
+      stopQueued.current = true;
+      return;
+    }
+    const current = (running.description ?? "").trim();
+    const typed = note !== undefined ? note.trim() : description.trim();
+    const editable = note !== undefined || (!running.task_id && !foreignWsName);
+    const desc = editable && typed !== current ? typed : undefined;
+    const prev = running.id === OPTIMISTIC_ID ? null : running;
+    void exclusive(() => doStop(desc, prev));
+  }
+
+  async function saveRunningDescription(value: string) {
+    if (!running || value === (running.description ?? "").trim()) return;
+    setRunning({ ...running, description: value });
+    if (!running.task_id) setDescription(value); // ať sedí i pole v liště
+    if (running.id === OPTIMISTIC_ID) {
+      pendingPatch.current = { ...pendingPatch.current, description: value };
+      return;
+    }
+    await updateRunningEntry(supabase, running.id, { description: value });
+  }
+
+  function saveDescription() {
+    void saveRunningDescription(description.trim());
+  }
+
+  function changeProject(projectId: string | null) {
+    if (!running) {
+      setIdleProject(projectId ?? "");
+      return;
+    }
+    const name = projects.find((p) => p.id === projectId)?.name;
+    setRunning({ ...running, project_id: projectId, projects: name ? { name } : null });
+    if (running.id === OPTIMISTIC_ID) {
+      pendingPatch.current = { ...pendingPatch.current, project_id: projectId };
+      return;
+    }
+    void updateRunningEntry(supabase, running.id, { project_id: projectId });
   }
 
   // ------------------------------------------------------------ focus mode
@@ -231,87 +370,106 @@ export default function TimerBar({
   // Pokračovat = nový záznam se stejným úkolem/projektem. Velký čas ve focus
   // módu sčítá úseky celé seance.
 
-  async function pauseFocus() {
-    if (busyRef.current || !running) return;
-    busyRef.current = true;
-    setBusy(true);
-    setPausedFocus({
-      project_id: running.project_id ?? null,
-      task_id: running.task_id ?? null,
-      title: running.tasks?.title ?? "",
-      description: running.description ?? "",
-      projectName: running.projects?.name ?? null,
-      accum:
-        (pausedFocus?.accum ?? 0) + entrySeconds(running.started_at, null),
-    });
-    setRunning(null);
-    await stopRunningTimer(supabase, userId, { silent: true });
-    window.dispatchEvent(new Event(TIMER_CHANGED_EVENT));
-    await load();
-    busyRef.current = false;
-    setBusy(false);
+  function openFocus() {
+    setPausedFocus(null); // nová seance, sčítání od nuly
+    setFocusOpen(true);
   }
 
-  async function resumeFocus() {
-    if (busyRef.current || !pausedFocus || running) return;
-    busyRef.current = true;
-    setBusy(true);
-    setRunning({
-      id: "optimistic",
-      workspace_id: wsId,
-      user_id: userId,
-      project_id: pausedFocus.project_id,
-      task_id: pausedFocus.task_id,
-      description: pausedFocus.description,
-      started_at: new Date().toISOString(),
-      stopped_at: null,
-      tasks: pausedFocus.title ? { title: pausedFocus.title } : null,
-      projects: pausedFocus.projectName ? { name: pausedFocus.projectName } : null,
-    } as unknown as TimeEntry);
-    await startTimer(supabase, userId, {
-      workspace_id: wsId,
-      project_id: pausedFocus.project_id,
-      task_id: pausedFocus.task_id,
-      task_title: pausedFocus.title || undefined,
-      description: pausedFocus.description,
+  async function pauseFocus(note: string) {
+    if (!running || busyRef.current || !toggleGuard()) return;
+    const prev = running;
+    const before = pausedFocus;
+    const value = note.trim();
+    await exclusive(async () => {
+      await startSettled();
+      loadSeq.current++;
+      setRunning(null);
+      setPausedFocus({
+        workspace_id: prev.workspace_id,
+        project_id: prev.project_id ?? null,
+        task_id: prev.task_id ?? null,
+        title: prev.tasks?.title ?? "",
+        description: value,
+        projectName: prev.projects?.name ?? null,
+        accum: (before?.accum ?? 0) + entrySeconds(prev.started_at, null),
+        entryId: null,
+      });
+      const res = await stopRunningTimer(supabase, userId, {
+        silent: true,
+        description: value !== (prev.description ?? "").trim() ? value : undefined,
+      });
+      if (!res.ok) {
+        setPausedFocus(before);
+        setRunning(prev);
+        return;
+      }
+      const stopped = res.stopped;
+      if (stopped?.stopped_at) {
+        // přesná délka úseku podle serveru
+        const segment = entrySeconds(stopped.started_at, stopped.stopped_at);
+        setPausedFocus((p) =>
+          p && { ...p, entryId: stopped.id, accum: (before?.accum ?? 0) + segment }
+        );
+      }
     });
-    await load();
-    busyRef.current = false;
-    setBusy(false);
   }
 
-  async function stopFocus() {
+  async function resumeFrom(p: PausedFocus) {
+    await exclusive(async () => {
+      const res = await startTimer(supabase, userId, {
+        workspace_id: p.workspace_id,
+        project_id: p.project_id,
+        task_id: p.task_id,
+        task_title: p.title || undefined,
+        project_name: p.projectName,
+        description: p.description,
+      });
+      await flushPendingPatch(res.running);
+    });
+  }
+
+  function resumeFocus() {
+    if (!pausedFocus || running || busyRef.current || !toggleGuard()) return;
+    void resumeFrom(pausedFocus);
+  }
+
+  function stopFocus(note: string) {
     setFocusOpen(false);
+    const p = pausedFocus;
+    if (running) {
+      stop(note);
+      return;
+    }
     setPausedFocus(null);
-    if (running) await stop();
+    // v pauze je záznam už uložený — jen do něj propsat dopsaný popis
+    const value = note.trim();
+    if (p?.entryId && value !== p.description)
+      void updateRunningEntry(supabase, p.entryId, { description: value });
   }
 
-  async function closeFocus() {
+  function closeFocus(note: string) {
     // zavření ✕ nikdy nenechá timer vypnutý: běžící běží dál, pauza se
     // před zavřením zase rozběhne (končí jen sčítání seance ve velkém čase)
     setFocusOpen(false);
-    if (!running && pausedFocus) await resumeFocus();
+    const p = pausedFocus;
     setPausedFocus(null);
+    const value = note.trim();
+    if (running) void saveRunningDescription(value);
+    else if (p && !busyRef.current) void resumeFrom({ ...p, description: value });
   }
 
-  /** Popis dopsaný ve focus módu — do běžícího záznamu i do meta pauzy. */
+  /** Popis dopsaný ve focus módu (blur/Enter) — do běžícího záznamu, v pauze
+      do uloženého úseku a do meta pro pokračování. */
   async function saveFocusDescription(text: string) {
     const value = text.trim();
-    if (pausedFocus) setPausedFocus({ ...pausedFocus, description: value });
     if (running) {
-      if (value === (running.description ?? "").trim()) return;
-      setRunning({ ...running, description: value } as TimeEntry);
-      if (!running.task_id) setDescription(value); // ať sedí i pole v liště
-      if (running.id !== "optimistic")
-        await updateRunningEntry(supabase, running.id, { description: value });
+      if (pausedFocus) setPausedFocus({ ...pausedFocus, description: value });
+      await saveRunningDescription(value);
+    } else if (pausedFocus && value !== pausedFocus.description) {
+      setPausedFocus({ ...pausedFocus, description: value });
+      if (pausedFocus.entryId)
+        await updateRunningEntry(supabase, pausedFocus.entryId, { description: value });
     }
-  }
-
-  async function saveDescription() {
-    if (!running || description.trim() === running.description) return;
-    await updateRunningEntry(supabase, running.id, {
-      description: description.trim(),
-    });
   }
 
   if (noTimer) {
@@ -337,13 +495,15 @@ export default function TimerBar({
     <header className="sticky top-0 z-40 border-b border-line bg-surface/90 backdrop-blur">
       {/* jeden řádek i na mobilu — zalomení řešíme zmenšením popisu, ne wrapem */}
       <div className="flex items-center gap-2 px-3 py-2.5 sm:gap-3 sm:px-4">
-        {isTaskEntry && running ? (
+        {readOnlyEntry && running ? (
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium">
               {running.tasks?.title || running.description || "Měřím čas"}
             </p>
             <p className="truncate text-xs text-ink-soft">
-              {running.projects?.name}
+              {[running.projects?.name, foreignWsName && `běží ve firmě ${foreignWsName}`]
+                .filter(Boolean)
+                .join(" · ")}
             </p>
           </div>
         ) : (
@@ -358,7 +518,11 @@ export default function TimerBar({
                   setSuggestOpen(true);
                   setHighlight(-1);
                 }}
-                onFocus={() => setSuggestOpen(true)}
+                onFocus={() => {
+                  setSuggestOpen(true);
+                  // seznam přiřazených úkolů obnovit nejvýš jednou za 30 s
+                  if (Date.now() - tasksLoadedAt.current > 30_000) loadMyTasks();
+                }}
                 onBlur={running ? saveDescription : undefined}
                 onKeyDown={(e) => {
                   if (e.key === "ArrowDown" && suggestions.length) {
@@ -416,13 +580,7 @@ export default function TimerBar({
               <ProjectPicker
                 projects={projects}
                 value={running ? running.project_id : idleProject || null}
-                onChange={(projectId) =>
-                  running
-                    ? updateRunningEntry(supabase, running.id, {
-                        project_id: projectId,
-                      })
-                    : setIdleProject(projectId ?? "")
-                }
+                onChange={changeProject}
                 hideLabelOnMobile
               />
             </div>
@@ -434,13 +592,27 @@ export default function TimerBar({
             running ? "text-brass" : "text-ink-soft/50"
           }`}
         >
-          {running ? fmtClock(entrySeconds(running.started_at, null)) : "0:00:00"}
+          <ElapsedClock startedAt={running?.started_at ?? null} />
         </span>
+
+        {/* stav timeru se nepodařilo ověřit — ukazujeme poslední známý */}
+        {syncProblem && (
+          <span
+            role="status"
+            title={
+              syncProblem === "auth"
+                ? "Přihlášení vypršelo — obnov stránku (F5)."
+                : "Stav timeru se nepodařilo ověřit (síť). Zkouším to znovu…"
+            }
+            aria-label="Stav timeru neověřen"
+            className="h-2 w-2 shrink-0 rounded-full bg-amber-500"
+          />
+        )}
 
         {/* focus mode — fullscreen s velkým časem (iPad na stole) */}
         {running && (
           <button
-            onClick={() => setFocusOpen(true)}
+            onClick={openFocus}
             aria-label="Focus mode přes celou obrazovku"
             title="Focus mode — velký čas přes celou obrazovku"
             className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-ink-soft/70 hover:bg-black/5 hover:text-ink"
@@ -461,11 +633,14 @@ export default function TimerBar({
         )}
 
         {running ? (
+          // bez disabled: Stop během rozběhu startu se zařadí, nepropadne
           <button
-            onClick={stop}
-            disabled={busy}
+            onClick={() => stop(undefined, true)}
+            aria-busy={busy}
             aria-label="Zastavit timer a uložit záznam"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-600 text-white shadow-sm hover:bg-red-500 disabled:opacity-60"
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-600 text-white shadow-sm hover:bg-red-500 ${
+              busy ? "opacity-60" : ""
+            }`}
           >
             <span className="block h-3.5 w-3.5 rounded-[2px] bg-current" />
           </button>

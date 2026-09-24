@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { entrySeconds, fmtClock } from "@/lib/format";
+import ElapsedClock from "@/components/ElapsedClock";
 import type { TimeEntry } from "@/lib/types";
 
 const THEME_KEY = "kronos:focus-theme";
@@ -32,16 +32,27 @@ export default function FocusMode({
   description: string;
   projectName: string | null;
   busy: boolean;
-  onPause: () => void;
+  /** pauza/stop/zavření dostanou i rozepsanou poznámku — na iPadu klepnutí
+      na tlačítko pole neopustí, takže by se uložení na blur nespustilo */
+  onPause: (note: string) => void;
   onResume: () => void;
-  onStop: () => void;
-  onClose: () => void;
+  onStop: (note: string) => void;
+  onClose: (note: string) => void;
   onSaveDescription: (text: string) => void;
 }) {
   const [dark, setDark] = useState(true);
   // rozepsaný popis — ukládá se při opuštění pole / Enterem
   const [draft, setDraft] = useState(description);
-  useEffect(() => setDraft(description), [description]);
+  // aktuální text i pro Esc listener (bez re-subscribe na každý znak)
+  const draftRef = useRef(description);
+  useEffect(() => {
+    setDraft(description);
+    draftRef.current = description;
+  }, [description]);
+  function editDraft(value: string) {
+    setDraft(value);
+    draftRef.current = value;
+  }
 
   useEffect(() => {
     try {
@@ -103,15 +114,13 @@ export default function FocusMode({
   // Esc zavře focus mode (první Esc případně ukončí fullscreen prohlížeče)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onClose(draftRef.current);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
   const paused = !running;
-  const seconds =
-    accumSeconds + (running ? entrySeconds(running.started_at, null) : 0);
   const frame = dark ? "bg-black text-white" : "bg-white text-black";
   const soft = dark ? "text-white/50" : "text-black/50";
   const ghostBtn = `rounded-full border px-4 py-2 text-sm transition-colors ${
@@ -144,7 +153,7 @@ export default function FocusMode({
             <input
               type="text"
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => editDraft(e.target.value)}
               onBlur={() => onSaveDescription(draft)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") e.currentTarget.blur();
@@ -162,7 +171,7 @@ export default function FocusMode({
           <input
             type="text"
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => editDraft(e.target.value)}
             onBlur={() => onSaveDescription(draft)}
             onKeyDown={(e) => {
               if (e.key === "Enter") e.currentTarget.blur();
@@ -181,7 +190,10 @@ export default function FocusMode({
             paused ? "opacity-40" : soft
           }`}
         >
-          {fmtClock(seconds)}
+          <ElapsedClock
+            startedAt={running?.started_at ?? null}
+            accumSeconds={accumSeconds}
+          />
         </p>
         <p className={`h-6 text-sm uppercase tracking-[0.3em] ${soft}`}>
           {paused ? "pauza" : ""}
@@ -191,7 +203,7 @@ export default function FocusMode({
       {/* ovládání: pauza/pokračovat + stop */}
       <div className="flex items-center justify-center gap-8 pb-4 sm:pb-6">
         <button
-          onClick={paused ? onResume : onPause}
+          onClick={() => (paused ? onResume() : onPause(draft))}
           disabled={busy}
           aria-label={paused ? "Pokračovat v měření" : "Pozastavit měření"}
           className={`flex h-20 w-20 items-center justify-center rounded-full border-2 transition-colors disabled:opacity-50 ${
@@ -212,10 +224,12 @@ export default function FocusMode({
           )}
         </button>
         <button
-          onClick={onStop}
-          disabled={busy}
+          onClick={() => onStop(draft)}
+          aria-busy={busy}
           aria-label="Zastavit a uložit záznam"
-          className="flex h-20 w-20 items-center justify-center rounded-full bg-red-600 text-white shadow-lg transition-colors hover:bg-red-500 disabled:opacity-50"
+          className={`flex h-20 w-20 items-center justify-center rounded-full bg-red-600 text-white shadow-lg transition-colors hover:bg-red-500 ${
+            busy ? "opacity-50" : ""
+          }`}
         >
           <span className="block h-7 w-7 rounded-[3px] bg-current" aria-hidden />
         </button>
@@ -231,7 +245,7 @@ export default function FocusMode({
           {dark ? "☀ bílá" : "● černá"}
         </button>
         <button
-          onClick={onClose}
+          onClick={() => onClose(draft)}
           aria-label="Zavřít focus mode"
           className={ghostBtn}
         >

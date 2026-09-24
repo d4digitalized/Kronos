@@ -1,10 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { cacheGet, cacheSet } from "@/lib/viewCache";
 import { dayKey, entrySeconds, fmtDuration, fmtTime } from "@/lib/format";
 import { toast } from "@/lib/toast";
+import {
+  notifyTimerChanged,
+  OPTIMISTIC_ID,
+  TIMER_CHANGED_EVENT,
+  type TimerChangedDetail,
+} from "@/lib/timer";
 import { confirmDialog } from "@/lib/confirm";
 import Picker from "@/components/Picker";
 import ProjectPicker, { ProjectDot } from "@/components/ProjectPicker";
@@ -33,6 +39,9 @@ export default function MyTimeView({
   const [projects, setProjects] = useState<Project[]>(cached?.projects ?? []);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(!cached);
+  const [loadError, setLoadError] = useState(false);
+  // pořadí načítání: starší odpověď nesmí přepsat novější
+  const loadSeq = useRef(0);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editStart, setEditStart] = useState("");
   const [editStop, setEditStop] = useState("");
@@ -43,12 +52,14 @@ export default function MyTimeView({
   const [addProject, setAddProject] = useState("");
   const [addTask, setAddTask] = useState("");
   const [addDescription, setAddDescription] = useState("");
-  const [addDate, setAddDate] = useState(() => new Date().toISOString().slice(0, 10));
+  // místní den (toISOString dává UTC — po půlnoci by nabídl včerejšek)
+  const [addDate, setAddDate] = useState(() => dayKey(new Date().toISOString()));
   const [addFrom, setAddFrom] = useState("09:00");
   const [addTo, setAddTo] = useState("10:00");
   const [addError, setAddError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const since = new Date();
     since.setDate(since.getDate() - 30);
     const [entriesRes, projectsRes] = await Promise.all([
@@ -67,16 +78,31 @@ export default function MyTimeView({
         .order("position")
         .order("name"),
     ]);
+    if (seq !== loadSeq.current) return;
+    setLoading(false);
+    // chyba ≠ „žádné záznamy": necháme, co je vidět, a nic necachujeme
+    if (entriesRes.error || projectsRes.error) {
+      setLoadError(true);
+      return;
+    }
+    setLoadError(false);
     const nextEntries = (entriesRes.data as TimeEntry[]) ?? [];
     const nextProjects = (projectsRes.data as Project[]) ?? [];
     setEntries(nextEntries);
     setProjects(nextProjects);
     cacheSet(cacheKey, { entries: nextEntries, projects: nextProjects });
-    setLoading(false);
   }, [supabase, wsId, userId, cacheKey]);
 
   useEffect(() => {
     load();
+    // zastavený / spuštěný timer v liště → hned vidět v seznamu
+    const onTimerChanged = (e: Event) => {
+      const detail = (e as CustomEvent<TimerChangedDetail>).detail;
+      if (detail?.running?.id === OPTIMISTIC_ID) return; // záznam ještě není v DB
+      load();
+    };
+    window.addEventListener(TIMER_CHANGED_EVENT, onTimerChanged);
+    return () => window.removeEventListener(TIMER_CHANGED_EVENT, onTimerChanged);
   }, [load]);
 
   // karty pro vybraný projekt (volitelná vazba ručního zápisu)
@@ -160,7 +186,7 @@ export default function MyTimeView({
       return;
     }
     setEditingId(null);
-    load();
+    notifyTimerChanged(); // přenačte seznam i lištu (mohl to být běžící záznam)
   }
 
   async function remove(entry: TimeEntry) {
@@ -169,8 +195,12 @@ export default function MyTimeView({
       message: "Tento záznam času se nenávratně smaže.",
     });
     if (!ok) return;
-    await supabase.from("time_entries").delete().eq("id", entry.id);
-    load();
+    const { error } = await supabase.from("time_entries").delete().eq("id", entry.id);
+    if (error) {
+      toast("Záznam se nepodařilo smazat.", "error");
+      return;
+    }
+    notifyTimerChanged(); // přenačte seznam i lištu (mohl to být běžící záznam)
   }
 
   if (loading) return <ListSkeleton />;
@@ -246,7 +276,16 @@ export default function MyTimeView({
         {addError && <p className="w-full text-sm text-danger">{addError}</p>}
       </form>
 
-      {entries.length === 0 && (
+      {loadError && (
+        <p className="flex flex-wrap items-center gap-2 p-4 text-sm text-danger">
+          Záznamy se nepodařilo načíst.
+          <button onClick={load} className="rounded-md px-2 py-1 text-xs underline">
+            Zkusit znovu
+          </button>
+        </p>
+      )}
+
+      {entries.length === 0 && !loadError && (
         <p className="p-4 text-sm text-ink-soft/70">
           Za posledních 30 dní tu nejsou žádné záznamy.
         </p>

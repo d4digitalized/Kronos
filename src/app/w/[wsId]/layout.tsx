@@ -53,7 +53,12 @@ export default async function WorkspaceLayout({
       />
       <div className="flex min-w-0 flex-1 flex-col">
         {/* výkaz v %: timer schovat — záznamy generuje procentní výkaz */}
-        <TimerBar wsId={wsId} userId={user.id} noTimer={percentReport} />
+        <TimerBar
+          wsId={wsId}
+          userId={user.id}
+          workspaces={workspaces}
+          noTimer={percentReport}
+        />
         {/* spodní padding drží obsah nad mobilním tab-barem (jen pod md) */}
         {/* flex-col: stránka (nástěnka) se může roztáhnout až ke spodní hraně */}
         <main className="flex flex-1 flex-col space-y-4 p-4 pb-24 md:pb-4">

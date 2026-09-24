@@ -26,8 +26,27 @@ export function fmtTime(iso: string): string {
   });
 }
 
+// Posun hodin prohlížeče vůči databázi. started_at běžícího timeru dává
+// now() serveru — s rozjetými hodinami v počítači by běžící čas stál na
+// 0:00:00 (opožděné hodiny) nebo startoval s náskokem (předbíhající).
+let clockOffsetMs = 0;
+
+/** Srovná hodiny podle now() ze serveru; bere střed doby požadavku. */
+export function syncServerClock(serverNowIso: string, requestStartedAt: number) {
+  const received = Date.now();
+  const server = new Date(serverNowIso).getTime();
+  // pomalá odpověď by odhad rozmazala — takový vzorek zahodíme
+  if (Number.isNaN(server) || received - requestStartedAt > 3000) return;
+  clockOffsetMs = server - (requestStartedAt + received) / 2;
+}
+
+/** „Teď" v čase serveru (pro běžící záznamy). */
+export function serverNow(): number {
+  return Date.now() + clockOffsetMs;
+}
+
 export function entrySeconds(startedAt: string, stoppedAt: string | null): number {
-  const end = stoppedAt ? new Date(stoppedAt).getTime() : Date.now();
+  const end = stoppedAt ? new Date(stoppedAt).getTime() : serverNow();
   return Math.max(0, (end - new Date(startedAt).getTime()) / 1000);
 }
 

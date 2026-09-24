@@ -27,7 +27,8 @@ export default function Toaster() {
   return (
     <div
       aria-live="polite"
-      className="fixed bottom-4 left-1/2 z-[60] flex w-full max-w-sm -translate-x-1/2 flex-col gap-2 px-4"
+      // nad focus módem (z-[100]) — chyba zastavení tam musí být vidět
+      className="fixed bottom-4 left-1/2 z-[110] flex w-full max-w-sm -translate-x-1/2 flex-col gap-2 px-4"
     >
       {items.map((item) => (
         <div
