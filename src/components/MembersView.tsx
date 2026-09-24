@@ -35,7 +35,9 @@ export default function MembersView({
 }) {
   const supabase = createClient();
   const [members, setMembers] = useState<Membership[]>([]);
-  const [mode, setMode] = useState<"portal" | "email">("portal");
+  // výběr ze všech uživatelů portálu jen pro super-admina; admin firmy
+  // přidává podle přesného e-mailu (existující účet se přidá, nový pozve)
+  const [mode, setMode] = useState<"portal" | "email">(isSuperAdmin ? "portal" : "email");
   const [email, setEmail] = useState("");
   const [pickedUserId, setPickedUserId] = useState<string | null>(null);
   const [portalUsers, setPortalUsers] = useState<PortalUser[]>([]);
@@ -65,7 +67,9 @@ export default function MembersView({
         .eq("workspace_id", wsId)
         .order("role"),
       // bez safeAction by selhaná akce (stará záložka) nechala skeleton navždy
-      safeAction(() => listAddablePortalUsers(wsId)),
+      isSuperAdmin
+        ? safeAction(() => listAddablePortalUsers(wsId))
+        : Promise.resolve({ users: [] as PortalUser[] }),
     ]);
     setLoading(false);
     // chyba ≠ „žádní členové" — nechat, co je vidět
@@ -75,7 +79,7 @@ export default function MembersView({
     }
     setMembers((data as unknown as Membership[]) ?? []);
     setPortalUsers(addable.users ?? []);
-  }, [supabase, wsId]);
+  }, [supabase, wsId, isSuperAdmin]);
 
   useEffect(() => {
     load();
@@ -204,30 +208,37 @@ export default function MembersView({
   return (
     <div className="space-y-4">
       <form onSubmit={invite} className="space-y-3 panel p-3">
-        <div className="inline-flex rounded-lg bg-black/5 p-0.5 text-sm">
-          {(
-            [
-              ["portal", "Z portálu"],
-              ["email", "E-mailem"],
-            ] as const
-          ).map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => {
-                setMode(key);
-                setMessage(null);
-              }}
-              className={`rounded-md px-3 py-1 transition-colors ${
-                mode === key
-                  ? "bg-surface font-medium text-ink shadow-sm"
-                  : "text-ink-soft hover:text-ink"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        {!isSuperAdmin && (
+          <p className="text-xs text-ink-soft/70">
+            Zadej přesný e-mail: existující účet se rovnou přidá, nový dostane pozvánku.
+          </p>
+        )}
+        {isSuperAdmin && (
+          <div className="inline-flex rounded-lg bg-black/5 p-0.5 text-sm">
+            {(
+              [
+                ["portal", "Z portálu"],
+                ["email", "E-mailem"],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => {
+                  setMode(key);
+                  setMessage(null);
+                }}
+                className={`rounded-md px-3 py-1 transition-colors ${
+                  mode === key
+                    ? "bg-surface font-medium text-ink shadow-sm"
+                    : "text-ink-soft hover:text-ink"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           {mode === "portal" ? (

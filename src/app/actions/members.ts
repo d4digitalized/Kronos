@@ -27,7 +27,9 @@ async function resolveOrInviteUser(
   return { userId: data.user.id, invited: true };
 }
 
-/** Uživatelé portálu, kteří zatím nejsou členy daného workspace. Jen pro adminy WS. */
+/** Uživatelé portálu, kteří zatím nejsou členy daného workspace. Jen pro
+    super-admina — seznam nese jména a e-maily lidí ze všech firem; admin
+    firmy přidává existující účet podle přesného e-mailu (inviteMember). */
 export async function listAddablePortalUsers(wsId: string): Promise<{
   users?: { id: string; email: string; full_name: string }[];
   error?: string;
@@ -38,8 +40,12 @@ export async function listAddablePortalUsers(wsId: string): Promise<{
   } = await supabase.auth.getUser();
   if (!user) return { error: "Nejsi přihlášený." };
 
-  const { data: isAdmin } = await supabase.rpc("is_ws_admin", { ws: wsId });
-  if (!isAdmin) return { error: "Nemáš oprávnění." };
+  const { data: me } = await supabase
+    .from("profiles")
+    .select("is_super_admin")
+    .eq("id", user.id)
+    .single();
+  if (!me?.is_super_admin) return { error: "Seznam uživatelů portálu vidí jen super-admin." };
 
   const admin = createAdminClient();
   const [{ data: profiles }, { data: members }] = await Promise.all([
