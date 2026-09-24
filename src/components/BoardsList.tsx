@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { ProjectDot, projectColor } from "@/components/ProjectPicker";
 import Avatar from "@/components/Avatar";
+import LoadError from "@/components/LoadError";
 import type { Membership, Project, ProjectCategory } from "@/lib/types";
 import { BoardsListSkeleton } from "@/components/Skeletons";
 import { cacheGet, cacheSet } from "@/lib/viewCache";
@@ -45,8 +46,12 @@ export default function BoardsList({
   const [fCat, setFCat] = useState("");
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(!cached);
+  const [loadError, setLoadError] = useState(false);
+  // pořadí načítání: starší odpověď nesmí přepsat novější
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const [projRes, memRes, pmRes, catRes] = await Promise.all([
       supabase
         .from("projects")
@@ -72,6 +77,14 @@ export default function BoardsList({
         .order("position")
         .order("name"),
     ]);
+    if (seq !== loadSeq.current) return;
+    // chyba ≠ „žádné projekty": necháme, co je vidět, a nic necachujeme
+    if (projRes.error || memRes.error || pmRes.error || catRes.error) {
+      setLoading(false);
+      setLoadError(true);
+      return;
+    }
+    setLoadError(false);
     const byProject: Record<string, string[]> = {};
     for (const row of pmRes.data ?? []) {
       byProject[row.project_id as string] = [
@@ -81,7 +94,7 @@ export default function BoardsList({
     }
     const nextProjects = (projRes.data as Project[]) ?? [];
     const nextMembers = (memRes.data as unknown as Membership[]) ?? [];
-    // kategorie ještě nemusí být v DB (migrace) — pak se filtr prostě neukáže
+    // firma bez kategorií — filtr se prostě neukáže
     const nextCategories = (catRes.data as ProjectCategory[]) ?? [];
     setProjects(nextProjects);
     setMembers(nextMembers);
@@ -101,6 +114,9 @@ export default function BoardsList({
   }, [load]);
 
   if (loading) return <BoardsListSkeleton />;
+  // chyba a nic dřív načteného: hláška místo „Žádné projekty"
+  if (loadError && projects.length === 0)
+    return <LoadError onRetry={load} message="Projekty se nepodařilo načíst." />;
 
   const query = q.trim().toLowerCase();
   const catColor = (c: ProjectCategory) => c.color || projectColor(c.id);
@@ -132,6 +148,10 @@ export default function BoardsList({
           </Link>
         )}
       </div>
+
+      {loadError && (
+        <LoadError onRetry={load} message="Projekty se nepodařilo obnovit." stale />
+      )}
 
       {/* kategorie firmy — filtr; spravuje je admin ve Správě projektů */}
       {categories.length > 0 && (

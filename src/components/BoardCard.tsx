@@ -4,6 +4,7 @@ import { memo } from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { priorityColor } from "@/lib/priority";
+import { dayKey } from "@/lib/format";
 import { projectColor } from "@/components/ProjectPicker";
 import Avatar from "@/components/Avatar";
 import type { Label, Membership, Task } from "@/lib/types";
@@ -40,8 +41,9 @@ function BoardCard({
     useSortable({ id: task.id, data: { type: "card" } });
 
   const isDone = !!task.completed_at;
+  // místní dnešek — UTC datum by mezi půlnocí a 2:00 bylo ještě včerejší
   const overdue =
-    !isDone && task.due_date && task.due_date < new Date().toISOString().slice(0, 10);
+    !isDone && task.due_date && task.due_date < dayKey(new Date().toISOString());
   const assignees = assigneeIds
     .map((id) => members.find((m) => m.user_id === id))
     .filter((m): m is Membership => !!m);

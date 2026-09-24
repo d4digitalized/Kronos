@@ -11,6 +11,7 @@ import { cacheGet, cacheSet } from "@/lib/viewCache";
 import ProjectPicker from "@/components/ProjectPicker";
 import PersonPicker, { HOURGLASS_ICON } from "@/components/PersonPicker";
 import TaskRow, { TaskGroup } from "@/components/TaskRow";
+import LoadError from "@/components/LoadError";
 import type { Contact, Membership, Project, Task } from "@/lib/types";
 import { ListSkeleton } from "@/components/Skeletons";
 
@@ -55,10 +56,14 @@ export default function InboxView({
   const [contacts, setContacts] = useState<Contact[]>(cached?.contacts ?? []);
   const [grants, setGrants] = useState<Set<string>>(new Set(cached?.grants ?? []));
   const [loading, setLoading] = useState(!cached);
+  const [loadError, setLoadError] = useState(false);
+  // pořadí načítání: starší odpověď by vrátila řádek, který se právě utřídil
+  const loadSeq = useRef(0);
   const [openTask, setOpenTask] = useState<Task | null>(null);
-  // rozpracované třídění — ref kvůli merge v load() bez závodu se setState
+  // rozpracované třídění — ref kvůli merge v load() bez závodu se setState;
+  // render čte jeho kopii `sorts` (ref se během renderu číst nesmí)
   const sortRef = useRef<Record<string, SortState>>({});
-  const [, bump] = useState(0);
+  const [sorts, setSorts] = useState<Record<string, SortState>>({});
 
   function patchSort(taskId: string, patch: Partial<SortState> | null) {
     if (patch === null) delete sortRef.current[taskId];
@@ -67,10 +72,11 @@ export default function InboxView({
         ...(sortRef.current[taskId] ?? EMPTY_SORT),
         ...patch,
       };
-    bump((x) => x + 1);
+    setSorts({ ...sortRef.current });
   }
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const [tRes, memRes, fuRes, grantRes, cRes] = await Promise.all([
       supabase
         .from("tasks")
@@ -102,6 +108,14 @@ export default function InboxView({
         .eq("user_id", userId),
       supabase.from("contacts").select("*").eq("workspace_id", wsId).order("name"),
     ]);
+    if (seq !== loadSeq.current) return;
+    // chyba ≠ „vše zatříděno": necháme, co je vidět, a nic necachujeme
+    if (tRes.error || memRes.error || fuRes.error || grantRes.error || cRes.error) {
+      setLoading(false);
+      setLoadError(true);
+      return;
+    }
+    setLoadError(false);
     const waiting = new Set((fuRes.data ?? []).map((r) => r.task_id as string));
     // v Inboxu je i úkol, kde jsem jediný řešitel já — pořád není zatříděný
     const fresh = ((tRes.data ?? []) as unknown as (Task & {
@@ -119,6 +133,7 @@ export default function InboxView({
       if (mine && !sortRef.current[t.id])
         sortRef.current[t.id] = { ...EMPTY_SORT, assignee: `u:${mine}` };
     }
+    setSorts({ ...sortRef.current });
     // rozpracované (už zatříděné v DB, ale nepotvrzené) řádky nechat viset
     setTasks((prev) => {
       const freshIds = new Set(fresh.map((t) => t.id));
@@ -140,7 +155,7 @@ export default function InboxView({
       contacts: nextContacts,
       grants: nextGrants,
     });
-  }, [supabase, wsId, userId, canDelegate, cacheKey]);
+  }, [supabase, wsId, userId, cacheKey]);
 
   useEffect(() => {
     load();
@@ -152,13 +167,14 @@ export default function InboxView({
   // projekty pro řádkový picker
   const [projects, setProjects] = useState<Project[]>([]);
   const loadProjects = useCallback(async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("projects")
       .select("*")
       .eq("workspace_id", wsId)
       .eq("archived", false)
       .order("position")
       .order("name");
+    if (error) return; // chyba ≠ žádné projekty — picker nechá předchozí seznam
     setProjects((data as Project[]) ?? []);
   }, [supabase, wsId]);
 
@@ -277,7 +293,7 @@ export default function InboxView({
   function dismiss(task: Task) {
     patchSort(task.id, null);
     setTasks((prev) => prev.filter((t) => t.id !== task.id));
-    notifyTasksChanged(); // počítadlo v navigaci
+    notifyTasksChanged(); // počítadlo v navigaci i reload Inboxu (posluchač)
   }
 
   async function markSorted(task: Task) {
@@ -333,6 +349,14 @@ export default function InboxView({
   }
 
   if (loading) return <ListSkeleton />;
+  // „Zkusit znovu" načte i projekty pro picker (padají se stejným výpadkem)
+  const retry = () => {
+    load();
+    loadProjects();
+  };
+  // chyba a nic dřív načteného: hláška místo „Vše zatříděno"
+  if (loadError && tasks.length === 0)
+    return <LoadError onRetry={retry} message="Inbox se nepodařilo načíst." />;
 
   return (
     <div className="w-full space-y-4">
@@ -345,10 +369,14 @@ export default function InboxView({
         </p>
       </div>
 
+      {loadError && (
+        <LoadError onRetry={retry} message="Inbox se nepodařilo obnovit." stale />
+      )}
+
       {tasks.length > 0 && (
         <TaskGroup label="Nezatříděné" count={tasks.length}>
           {tasks.map((task) => {
-            const s = sortRef.current[task.id] ?? EMPTY_SORT;
+            const s = sorts[task.id] ?? EMPTY_SORT;
             const touched = !!(s.project || s.assignee || s.waiting);
             return (
               <TaskRow
@@ -440,7 +468,8 @@ export default function InboxView({
           onClose={() => setOpenTask(null)}
           onChanged={() => {
             setOpenTask(null);
-            load();
+            // přenačte Inbox (vlastní posluchač) i počítadlo — load() navíc
+            // by znamenal druhé načtení téhož
             notifyTasksChanged();
           }}
         />

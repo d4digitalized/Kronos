@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { toast } from "@/lib/toast";
 import { entrySeconds } from "@/lib/format";
 import { ProjectDot } from "@/components/ProjectPicker";
 import type { Project, TimeEntry } from "@/lib/types";
 import { ListSkeleton } from "@/components/Skeletons";
+import LoadError from "@/components/LoadError";
 
 /** Délka pracovního dne, do které se procenta rozpadají. */
 const DAY_HOURS = 8;
@@ -49,11 +50,15 @@ export default function PercentReportView({
   // popis činnosti k projektu — stane se popisem záznamu
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  // rychlé přepínání týdnů: starší odpověď nesmí přepsat novější
+  const loadSeq = useRef(0);
   const [saving, setSaving] = useState(false);
 
   const weekEnd = useMemo(() => addDays(weekStart, 7), [weekStart]);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const [projRes, entryRes] = await Promise.all([
       supabase
         .from("projects")
@@ -70,9 +75,17 @@ export default function PercentReportView({
         .gte("started_at", weekStart.toISOString())
         .lt("started_at", weekEnd.toISOString()),
     ]);
+    if (seq !== loadSeq.current) return;
+    setLoading(false);
+    // chyba ≠ prázdný týden: tabulka by se vyprázdnila a uložení pak
+    // přepsalo den tím, co by člověk vyplnil naslepo
+    if (projRes.error || entryRes.error) {
+      setLoadError(true);
+      return;
+    }
+    setLoadError(false);
     setProjects((projRes.data as Project[]) ?? []);
     setEntries((entryRes.data as TimeEntry[]) ?? []);
-    setLoading(false);
   }, [supabase, wsId, userId, weekStart, weekEnd]);
 
   useEffect(() => {
@@ -127,7 +140,7 @@ export default function PercentReportView({
   const total = rows.reduce((sum, r) => sum + r.pct, 0);
 
   async function save() {
-    if (saving) return;
+    if (saving || !dayVisible || loadError) return;
     if (total > 100) {
       toast("Součet nesmí přesáhnout 100 %.", "error");
       return;
@@ -205,6 +218,19 @@ export default function PercentReportView({
 
   const today = isoDay(new Date());
   const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+  // ukládat jen den, který je vidět (a není v budoucnu)
+  const dayVisible = day <= today && days.some((d) => isoDay(d) === day);
+
+  // týden a vybraný den se posouvají spolu — dřív šipky nechaly vybraný den
+  // ve starém týdnu: nebyl vidět, tabulka se vyprázdnila a uložení pak
+  // přepsalo ten skrytý den
+  function shiftWeek(delta: number) {
+    setWeekStart((w) => addDays(w, delta * 7));
+    setDay((d) => {
+      const next = isoDay(addDays(new Date(`${d}T12:00:00`), delta * 7));
+      return next > today ? today : next;
+    });
+  }
 
   return (
     <div className="w-full space-y-4">
@@ -219,7 +245,7 @@ export default function PercentReportView({
       {/* pruh dnů: šipky přepínají týden, každý den ukazuje uložená % */}
       <div className="flex items-center gap-1.5 panel p-2">
         <button
-          onClick={() => setWeekStart((w) => addDays(w, -7))}
+          onClick={() => shiftWeek(-1)}
           aria-label="Předchozí týden"
           className="rounded-md px-2 py-1 text-ink-soft hover:bg-black/5"
         >
@@ -264,13 +290,21 @@ export default function PercentReportView({
           })}
         </div>
         <button
-          onClick={() => setWeekStart((w) => addDays(w, 7))}
+          onClick={() => shiftWeek(1)}
           aria-label="Další týden"
           className="rounded-md px-2 py-1 text-ink-soft hover:bg-black/5"
         >
           ›
         </button>
       </div>
+
+      {loadError && (
+        <LoadError
+          onRetry={load}
+          message="Výkaz se nepodařilo načíst."
+          stale={projects.length > 0}
+        />
+      )}
 
       {/* tabulka projektů s procenty */}
       {projects.length === 0 ? (
@@ -334,7 +368,7 @@ export default function PercentReportView({
             </span>
             <button
               onClick={save}
-              disabled={saving || total > 100}
+              disabled={saving || total > 100 || !dayVisible || loadError}
               className="btn-primary disabled:opacity-60"
             >
               {saving ? "Ukládám…" : "Uložit výkaz"}

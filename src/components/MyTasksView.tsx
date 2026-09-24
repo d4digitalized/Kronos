@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { createClient } from "@/lib/supabase/client";
 import { toast } from "@/lib/toast";
@@ -9,6 +9,7 @@ import { cacheGet, cacheSet } from "@/lib/viewCache";
 import { TASKS_CHANGED_EVENT } from "@/lib/tasksChanged";
 import TaskRow, { TaskGroup, dueBuckets } from "@/components/TaskRow";
 import Avatar, { type AvatarLike } from "@/components/Avatar";
+import LoadError from "@/components/LoadError";
 import type { Contact, Membership, Task } from "@/lib/types";
 import { ListSkeleton } from "@/components/Skeletons";
 
@@ -48,6 +49,9 @@ export default function MyTasksView({
   );
   const [mode, setMode] = useState<"mine" | "lead">("mine");
   const [loading, setLoading] = useState(!cached);
+  const [loadError, setLoadError] = useState(false);
+  // pořadí načítání: starší odpověď nesmí přepsat novější
+  const loadSeq = useRef(0);
   const [openTask, setOpenTask] = useState<Task | null>(null);
 
   const byDue = (a: Task, b: Task) =>
@@ -56,6 +60,7 @@ export default function MyTasksView({
     a.title.localeCompare(b.title, "cs");
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const [mineRes, memRes, fuRes, leadRes] = await Promise.all([
       supabase
         .from("task_assignees")
@@ -88,6 +93,14 @@ export default function MyTasksView({
         .is("completed_at", null)
         .is("parent_id", null),
     ]);
+    if (seq !== loadSeq.current) return;
+    // chyba ≠ „žádné úkoly": necháme, co je vidět, a nic necachujeme
+    if (mineRes.error || memRes.error || fuRes.error || leadRes.error) {
+      setLoading(false);
+      setLoadError(true);
+      return;
+    }
+    setLoadError(false);
     const waiting = new Set((fuRes.data ?? []).map((r) => r.task_id as string));
     const mine = ((mineRes.data ?? []) as unknown as { tasks: Task }[])
       .map((r) => r.tasks)
@@ -153,6 +166,9 @@ export default function MyTasksView({
   }
 
   if (loading) return <ListSkeleton />;
+  // chyba a nic dřív načteného: hláška místo „Nemáš žádné otevřené úkoly"
+  if (loadError && tasks.length === 0 && leadTasks.length === 0)
+    return <LoadError onRetry={load} message="Úkoly se nepodařilo načíst." />;
 
   const shown = mode === "mine" ? tasks : leadTasks;
   const groups = dueBuckets(shown);
@@ -195,6 +211,10 @@ export default function MyTasksView({
           </div>
         )}
       </div>
+
+      {loadError && (
+        <LoadError onRetry={load} message="Úkoly se nepodařilo obnovit." stale />
+      )}
 
       {shown.length === 0 ? (
         <p className="panel p-8 text-center text-sm text-ink-soft/70">

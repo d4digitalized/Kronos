@@ -10,6 +10,7 @@ import { cacheGet, cacheSet } from "@/lib/viewCache";
 import { TASKS_CHANGED_EVENT } from "@/lib/tasksChanged";
 import { ProjectDot } from "@/components/ProjectPicker";
 import Avatar from "@/components/Avatar";
+import LoadError from "@/components/LoadError";
 import TaskRow, { TaskGroup } from "@/components/TaskRow";
 import type { Contact, Membership, Project, Task } from "@/lib/types";
 import { ListSkeleton } from "@/components/Skeletons";
@@ -52,6 +53,9 @@ export default function TasksView({
     cached?.ghostAssignees ?? {}
   );
   const [loading, setLoading] = useState(!cached);
+  const [loadError, setLoadError] = useState(false);
+  // pořadí načítání: starší odpověď nesmí přepsat novější
+  const loadSeq = useRef(0);
   const [openTask, setOpenTask] = useState<Task | null>(null);
 
   // sdílený odkaz: jednorázově otevřít kartu z ?task=
@@ -64,8 +68,10 @@ export default function TasksView({
       .select("*")
       .eq("id", initialTaskId)
       .maybeSingle()
-      .then(({ data }) => {
+      .then(({ data, error }) => {
         if (data) setOpenTask(data as Task);
+        // výpadek spojení ≠ „úkol neexistuje"
+        else if (error) toast("Úkol se nepodařilo načíst.", "error");
         else toast("Úkol nenalezen nebo k němu nemáš přístup.", "error");
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -81,6 +87,7 @@ export default function TasksView({
   const [fStatus, setFStatus] = useState<Status>("active");
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const [taskRes, projRes, memRes, taRes, grantRes, contactRes, tcaRes] =
       await Promise.all([
       supabase
@@ -116,6 +123,16 @@ export default function TasksView({
         .select("task_id, contact_id, tasks!inner(workspace_id)")
         .eq("tasks.workspace_id", wsId),
     ]);
+    if (seq !== loadSeq.current) return;
+    // chyba ≠ „žádné úkoly": necháme, co je vidět, a nic necachujeme
+    if (
+      [taskRes, projRes, memRes, taRes, grantRes, contactRes, tcaRes].some((r) => r.error)
+    ) {
+      setLoading(false);
+      setLoadError(true);
+      return;
+    }
+    setLoadError(false);
     const nextTasks = (taskRes.data as Task[]) ?? [];
     const nextProjects = (projRes.data as Project[]) ?? [];
     const nextMembers = (memRes.data as unknown as Membership[]) ?? [];
@@ -147,7 +164,7 @@ export default function TasksView({
       ghostAssignees: ghostByTask,
     });
     setLoading(false);
-  }, [supabase, wsId, cacheKey]);
+  }, [supabase, wsId, userId, cacheKey]);
 
   useEffect(() => {
     load();
@@ -168,6 +185,9 @@ export default function TasksView({
   }
 
   if (loading) return <ListSkeleton />;
+  // chyba a nic dřív načteného: hláška místo „Žádné úkoly"
+  if (loadError && tasks.length === 0)
+    return <LoadError onRetry={load} message="Úkoly se nepodařilo načíst." />;
 
   const q = fText.trim().toLowerCase();
   // tým = já + lidé s grantem; admin vidí všechny
@@ -291,6 +311,10 @@ export default function TasksView({
           <option value="all">Vše</option>
         </select>
       </div>
+
+      {loadError && (
+        <LoadError onRetry={load} message="Úkoly se nepodařilo obnovit." stale />
+      )}
 
       {/* přepínač lidí: kliknutím na avatar vidím, na čem kdo dělá */}
       {(switcherMembers.length > 1 || ghosts.length > 0) && (

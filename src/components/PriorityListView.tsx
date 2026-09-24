@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import {
   DndContext,
@@ -23,7 +23,6 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { createClient } from "@/lib/supabase/client";
-import { posBetween } from "@/lib/position";
 import { toast } from "@/lib/toast";
 import { pingNotifyEmails } from "@/lib/notify";
 import { cacheGet, cacheSet } from "@/lib/viewCache";
@@ -31,6 +30,7 @@ import { TASKS_CHANGED_EVENT } from "@/lib/tasksChanged";
 import { fmtDate } from "@/lib/format";
 import { priorityColor } from "@/lib/priority";
 import { ProjectDot, projectColor } from "@/components/ProjectPicker";
+import LoadError from "@/components/LoadError";
 import type { Membership, Task } from "@/lib/types";
 import { ListSkeleton } from "@/components/Skeletons";
 
@@ -61,7 +61,14 @@ export default function PriorityListView({
   const [tasks, setTasks] = useState<PriorityTask[]>(cached?.tasks ?? []);
   const [members, setMembers] = useState<Membership[]>(cached?.members ?? []);
   const [loading, setLoading] = useState(!cached);
+  const [loadError, setLoadError] = useState(false);
+  // pořadí načítání: starší odpověď nesmí přepsat novější
+  const loadSeq = useRef(0);
   const [openTask, setOpenTask] = useState<Task | null>(null);
+  // členové firmy otevřené karty — seznam míchá firmy, `members` jsou jen
+  // z aktuální; ostatní firmy se dotáhnou při otevření (cache per firma)
+  const [cardMembers, setCardMembers] = useState<Membership[]>([]);
+  const wsMembers = useRef<Record<string, Membership[]>>({});
   const [activeTask, setActiveTask] = useState<PriorityTask | null>(null);
   // filtry: firma a fulltext; pořadí se přetahováním mění jen v plném seznamu
   const [fWs, setFWs] = useState("");
@@ -75,6 +82,7 @@ export default function PriorityListView({
   );
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const [mineRes, memRes, fuRes, orderRes] = await Promise.all([
       supabase
         .from("task_assignees")
@@ -96,6 +104,14 @@ export default function PriorityListView({
         .select("task_id, position")
         .eq("user_id", userId),
     ]);
+    if (seq !== loadSeq.current) return;
+    // chyba ≠ „žádné úkoly": necháme, co je vidět, a nic necachujeme
+    if (mineRes.error || memRes.error || fuRes.error || orderRes.error) {
+      setLoading(false);
+      setLoadError(true);
+      return;
+    }
+    setLoadError(false);
     const waiting = new Set((fuRes.data ?? []).map((r) => r.task_id as string));
     const order = new Map(
       (orderRes.data ?? []).map((r) => [r.task_id as string, r.position as number])
@@ -151,6 +167,30 @@ export default function PriorityListView({
     load();
   }
 
+  /** Karta jiné firmy potřebuje členy své firmy — s cizími by CardModal
+      ukázal řešitele jako „?", špatné výběry lidí i admin volby. */
+  async function openCard(task: Task) {
+    if (task.workspace_id !== wsId) {
+      let mem = wsMembers.current[task.workspace_id];
+      if (!mem) {
+        const { data, error } = await supabase
+          .from("workspace_members")
+          .select(
+            "*, profiles(id, email, full_name, is_super_admin, avatar_initials, avatar_color, tag_name)"
+          )
+          .eq("workspace_id", task.workspace_id);
+        if (error) {
+          toast("Kartu se nepodařilo otevřít.", "error");
+          return;
+        }
+        mem = (data as unknown as Membership[]) ?? [];
+        wsMembers.current[task.workspace_id] = mem;
+      }
+      setCardMembers(mem);
+    }
+    setOpenTask(task);
+  }
+
   function handleDragStart(event: DragStartEvent) {
     setActiveTask(tasks.find((t) => t.id === String(event.active.id)) ?? null);
   }
@@ -184,6 +224,9 @@ export default function PriorityListView({
   }
 
   if (loading) return <ListSkeleton />;
+  // chyba a nic dřív načteného: hláška místo „Nemáš žádné otevřené úkoly"
+  if (loadError && tasks.length === 0)
+    return <LoadError onRetry={load} message="Úkoly se nepodařilo načíst." />;
 
   const today = isoDay(new Date());
   // firmy, ze kterých mám úkoly — v pořadí prvního výskytu
@@ -230,6 +273,10 @@ export default function PriorityListView({
           />
         )}
       </div>
+
+      {loadError && (
+        <LoadError onRetry={load} message="Úkoly se nepodařilo obnovit." stale />
+      )}
 
       {/* filtr firem — barvy sedí s pruhem a štítkem u řádku */}
       {wsOptions.length > 1 && (
@@ -302,7 +349,7 @@ export default function PriorityListView({
                   order={tasks.findIndex((t) => t.id === task.id) + 1}
                   today={today}
                   draggable={dragEnabled}
-                  onOpen={setOpenTask}
+                  onOpen={openCard}
                   onToggleDone={toggleDone}
                 />
               ))}
@@ -322,7 +369,7 @@ export default function PriorityListView({
       {openTask && (
         <CardModal
           task={openTask}
-          members={members}
+          members={openTask.workspace_id === wsId ? members : cardMembers}
           userId={userId}
           onClose={() => setOpenTask(null)}
           onChanged={() => {

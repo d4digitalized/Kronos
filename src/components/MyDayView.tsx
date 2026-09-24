@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cacheGet, cacheSet } from "@/lib/viewCache";
 import {
   DndContext,
@@ -22,6 +22,7 @@ import { toast } from "@/lib/toast";
 import { fmtClock } from "@/lib/format";
 import { syncTaskCalendar } from "@/app/actions/calendar";
 import { ProjectDot, projectColor } from "@/components/ProjectPicker";
+import LoadError from "@/components/LoadError";
 import type { Membership, Task } from "@/lib/types";
 import { MyDaySkeleton } from "@/components/Skeletons";
 
@@ -171,7 +172,12 @@ function PlannedBlock({
     id: `plan-${task.id}`,
     data: { taskId: task.id, title: task.title, durationMin, task } satisfies DragData,
   });
-  const rz = useDraggable({
+  // destrukturováno — `rz.setNodeRef` v renderu lint bral jako čtení refu
+  const {
+    attributes: rzAttributes,
+    listeners: rzListeners,
+    setNodeRef: rzSetNodeRef,
+  } = useDraggable({
     id: `resize-${task.id}`,
     data: {
       taskId: task.id,
@@ -241,11 +247,11 @@ function PlannedBlock({
       </span>
       {/* úchyt pro změnu délky — stopPropagation, aby netáhl celý blok */}
       <div
-        ref={rz.setNodeRef}
-        {...rz.attributes}
-        {...rz.listeners}
+        ref={rzSetNodeRef}
+        {...rzAttributes}
+        {...rzListeners}
         onPointerDown={(e) => {
-          (rz.listeners?.onPointerDown as ((ev: unknown) => void) | undefined)?.(e);
+          (rzListeners?.onPointerDown as ((ev: unknown) => void) | undefined)?.(e);
           e.stopPropagation();
         }}
         onClick={(e) => e.stopPropagation()}
@@ -301,6 +307,10 @@ export default function MyDayView({
   const [planTo, setPlanTo] = useState("10:00");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(!cached);
+  const [loadError, setLoadError] = useState(false);
+  // pořadí načítání: při listování týdny nesmí pozdě doběhlý dřívější týden
+  // přepsat ten, na který se právě díváš
+  const loadSeq = useRef(0);
   const [dragging, setDragging] = useState<DragData | null>(null);
   const [resizing, setResizing] = useState<{
     taskId: string;
@@ -317,6 +327,7 @@ export default function MyDayView({
   const weekEnd = useMemo(() => addDays(weekStart, 7), [weekStart]);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const fromISO = weekStart.toISOString();
     const toISO = weekEnd.toISOString();
     const fromDay = isoDay(weekStart);
@@ -352,6 +363,14 @@ export default function MyDayView({
         .is("tasks.planned_start", null)
         .is("tasks.parent_id", null),
     ]);
+    if (seq !== loadSeq.current) return;
+    // chyba ≠ prázdný týden: necháme, co je vidět, a nic necachujeme
+    if (mineRes.error || createdRes.error || dueRes.error || candRes.error) {
+      setLoading(false);
+      setLoadError(true);
+      return;
+    }
+    setLoadError(false);
     const mine = ((mineRes.data ?? []) as unknown as { tasks: PlannedTask }[]).map(
       (r) => r.tasks
     );
@@ -395,6 +414,7 @@ export default function MyDayView({
       setCandidates(known.candidates);
       setLoading(false);
     }
+    setLoadError(false); // chyba patřila předchozímu týdnu
     load();
   }, [load, cacheKey]);
 
@@ -464,10 +484,13 @@ export default function MyDayView({
       return;
     }
     toast(`Naplánováno: ${task.title} (${hhmm(startISO)}–${hhmm(endISO)})`);
-    // kalendář nečekáme — jen případnou chybu ohlásíme
-    syncTaskCalendar(task.id).then((res) => {
-      if (res.error) toast(res.error, "error");
-    });
+    // kalendář nečekáme — jen případnou chybu ohlásíme; akce může i spadnout
+    // (po nasazení staré ID akce, výpadek sítě)
+    syncTaskCalendar(task.id)
+      .then((res) => {
+        if (res.error) toast(res.error, "error");
+      })
+      .catch(() => toast("Kalendář se nepodařilo aktualizovat.", "error"));
   }
 
   function applyPlan(task: PlannedTask, from: string, to: string) {
@@ -544,19 +567,26 @@ export default function MyDayView({
       return;
     }
     toast(`Odnaplánováno: ${task.title}`);
-    syncTaskCalendar(task.id).then((res) => {
-      if (res.error) toast(res.error, "error");
-    });
+    syncTaskCalendar(task.id)
+      .then((res) => {
+        if (res.error) toast(res.error, "error");
+      })
+      .catch(() => toast("Kalendář se nepodařilo aktualizovat.", "error"));
   }
 
   /** Otevře kartu úkolu v modalu nad Mým dnem (nenaviguje do projektu). */
   async function openCard(task: PlannedTask) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("workspace_members")
       .select(
         "*, profiles(id, email, full_name, is_super_admin, avatar_initials, avatar_color, tag_name)"
       )
       .eq("workspace_id", task.workspace_id);
+    // bez členů by karta ukázala řešitele jako „?" i špatné volby — neotevírat
+    if (error) {
+      toast("Kartu se nepodařilo otevřít.", "error");
+      return;
+    }
     setCardMembers((data as unknown as Membership[]) ?? []);
     setOpenTaskCard(task);
   }
@@ -660,6 +690,15 @@ export default function MyDayView({
           {" · "}úkol přetáhni z panelu vpravo na hodinu
         </p>
       </div>
+
+      {/* chyba ≠ prázdný týden; „poslední známý stav" jen u týdne z cache */}
+      {loadError && (
+        <LoadError
+          onRetry={load}
+          message={cached ? "Týden se nepodařilo obnovit." : "Týden se nepodařilo načíst."}
+          stale={!!cached}
+        />
+      )}
 
       {/* pruh dnů */}
       <div className="flex items-center gap-1.5 panel p-2">
@@ -850,7 +889,11 @@ export default function MyDayView({
 
       {results.length === 0 ? (
         <p className="py-4 text-center text-xs text-ink-soft/60">
-          {q ? "Nic nenalezeno." : "Žádné nenaplánované úkoly. 🎉"}
+          {q
+            ? "Nic nenalezeno."
+            : loadError && candidates.length === 0
+              ? "Úkoly se nepodařilo načíst."
+              : "Žádné nenaplánované úkoly. 🎉"}
         </p>
       ) : (
         <div className="-mx-1 max-h-[30rem] space-y-0.5 overflow-y-auto px-1">

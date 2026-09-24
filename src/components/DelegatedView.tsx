@@ -1,14 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { createClient } from "@/lib/supabase/client";
 import { toast } from "@/lib/toast";
 import { pingNotifyEmails } from "@/lib/notify";
-import { fmtDate } from "@/lib/format";
+import { dayKey, fmtDate } from "@/lib/format";
 import { cacheGet, cacheSet } from "@/lib/viewCache";
 import { TASKS_CHANGED_EVENT } from "@/lib/tasksChanged";
 import TaskRow, { TaskGroup } from "@/components/TaskRow";
+import LoadError from "@/components/LoadError";
 import type { Membership, Task, TaskFollowup } from "@/lib/types";
 import { ListSkeleton } from "@/components/Skeletons";
 
@@ -101,9 +102,13 @@ export default function DelegatedView({
   const [rows, setRows] = useState<TaskFollowup[]>(cached?.rows ?? []);
   const [members, setMembers] = useState<Membership[]>(cached?.members ?? []);
   const [loading, setLoading] = useState(!cached);
+  const [loadError, setLoadError] = useState(false);
+  // pořadí načítání: starší odpověď nesmí přepsat novější
+  const loadSeq = useRef(0);
   const [openTask, setOpenTask] = useState<Task | null>(null);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     const [fuRes, memRes] = await Promise.all([
       supabase
         .from("task_followups")
@@ -120,6 +125,14 @@ export default function DelegatedView({
         )
         .eq("workspace_id", wsId),
     ]);
+    if (seq !== loadSeq.current) return;
+    // chyba ≠ „na nikoho nečekáš": necháme, co je vidět, a nic necachujeme
+    if (fuRes.error || memRes.error) {
+      setLoading(false);
+      setLoadError(true);
+      return;
+    }
+    setLoadError(false);
     const list = ((fuRes.data ?? []) as unknown as TaskFollowup[]).sort(
       // nejdřív podle slíbeného termínu (do kdy), pak podle termínu úkolu
       (a, b) =>
@@ -166,6 +179,9 @@ export default function DelegatedView({
   }
 
   if (loading) return <ListSkeleton />;
+  // chyba a nic dřív načteného: hláška místo „Na nikoho nečekáš"
+  if (loadError && rows.length === 0)
+    return <LoadError onRetry={load} message="Follow-upy se nepodařilo načíst." />;
 
   // skupiny podle slíbeného termínu „do kdy" (rows už seřazené v load())
   const groups = waitBuckets(rows.filter((r) => r.tasks));
@@ -181,9 +197,13 @@ export default function DelegatedView({
         </p>
       </div>
 
+      {loadError && (
+        <LoadError onRetry={load} message="Follow-upy se nepodařilo obnovit." stale />
+      )}
+
       {rows.length === 0 ? (
         <p className="panel p-8 text-center text-sm text-ink-soft/70">
-          Na nikoho nečekáš. Follow-up nastavíš na kartě úkolu volbou „Čekám na…".
+          Na nikoho nečekáš. Follow-up nastavíš na kartě úkolu volbou „Čekám na…“.
         </p>
       ) : (
         groups.map((group) => (
@@ -194,9 +214,10 @@ export default function DelegatedView({
             accent={group.accent}
           >
             {group.rows.map((row) => {
-              const since = row.waiting_since ?? row.created_at.slice(0, 10);
+              // místní den — UTC by mezi půlnocí a 2:00 dal včerejšek
+              const since = row.waiting_since ?? dayKey(row.created_at);
               const until = row.waiting_until ?? null;
-              const today = new Date().toISOString().slice(0, 10);
+              const today = dayKey(new Date().toISOString());
               const overdue = until && until < today;
               // o kolik dní je slíbený termín po termínu
               const overdueDays = overdue

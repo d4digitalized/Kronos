@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { toast } from "@/lib/toast";
+import LoadError from "@/components/LoadError";
 import type { NotificationPrefs } from "@/lib/types";
 
 const DEFAULTS: Omit<NotificationPrefs, "user_id"> = {
@@ -41,13 +42,26 @@ export default function NotificationSettings({ userId }: { userId: string }) {
   const supabase = createClient();
   const [prefs, setPrefs] = useState(DEFAULTS);
   const [loading, setLoading] = useState(true);
+  // Bez úspěšného načtení jsou vidět jen výchozí hodnoty — přepnutí by je
+  // uložilo všechny a přepsalo skutečné nastavení. Proto přepínače zamčené.
+  const [loadError, setLoadError] = useState(false);
+  // pořadí načítání: starší odpověď nesmí přepsat novější
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
-    const { data } = await supabase
+    const seq = ++loadSeq.current;
+    const { data, error } = await supabase
       .from("notification_prefs")
       .select("*")
       .eq("user_id", userId)
       .maybeSingle();
+    if (seq !== loadSeq.current) return;
+    if (error) {
+      setLoadError(true);
+      setLoading(false);
+      return;
+    }
+    setLoadError(false);
     if (data) {
       setPrefs({
         on_assign: data.on_assign,
@@ -82,6 +96,9 @@ export default function NotificationSettings({ userId }: { userId: string }) {
       <h2 className="border-b border-line/70 px-4 py-2.5 text-sm font-semibold">
         E-mailové notifikace
       </h2>
+      {loadError && (
+        <LoadError onRetry={load} message="Nastavení notifikací se nepodařilo načíst." />
+      )}
       <div className="divide-y divide-line/50">
         {ITEMS.map((item) => (
           <label
@@ -92,6 +109,7 @@ export default function NotificationSettings({ userId }: { userId: string }) {
               type="checkbox"
               checked={prefs[item.key]}
               onChange={() => toggle(item.key)}
+              disabled={loadError}
               className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
             />
             <span>

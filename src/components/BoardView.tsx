@@ -38,6 +38,7 @@ import type { BoardColumn, Label, Membership, Task } from "@/lib/types";
 import BoardCard from "@/components/BoardCard";
 import { ProjectDot } from "@/components/ProjectPicker";
 import { BoardSkeleton } from "@/components/Skeletons";
+import LoadError from "@/components/LoadError";
 
 // Modal karty mimo základní bundle nástěnky — načte se až při otevření.
 const CardModal = dynamic(() => import("@/components/CardModal"), { ssr: false });
@@ -114,6 +115,16 @@ export default function BoardView({
   const [doneTasks, setDoneTasks] = useState<Task[]>(cached?.doneTasks ?? []);
   const [members, setMembers] = useState<Membership[]>(cached?.members ?? []);
   const [loading, setLoading] = useState(!cached);
+  const [loadError, setLoadError] = useState(false);
+  // Pořadí načítání: starší odpověď nesmí přepsat novější. Optimistický
+  // přesun (drag & drop) sekvenci posune taky — načtení rozjeté před ním by
+  // po doběhnutí vrátilo kartu na původní místo (viz discardLoads).
+  const loadSeq = useRef(0);
+  const loadsRunning = useRef(0);
+  // přesun zahodil rozjeté načtení → po uložení přesunu načíst znovu
+  const reloadAfterMove = useRef(false);
+  // Enter dvakrát rychle za sebou nesmí sloupec / kartu založit dvakrát
+  const adding = useRef(false);
   const [openTask, setOpenTask] = useState<Task | null>(null);
   const [activeCard, setActiveCard] = useState<Task | null>(null);
 
@@ -127,8 +138,10 @@ export default function BoardView({
       .select("*")
       .eq("id", initialTaskId)
       .maybeSingle()
-      .then(({ data }) => {
+      .then(({ data, error }) => {
         if (data) setOpenTask(data as Task);
+        // výpadek spojení ≠ „úkol neexistuje"
+        else if (error) toast("Úkol se nepodařilo načíst.", "error");
         else toast("Úkol nenalezen nebo k němu nemáš přístup.", "error");
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -168,6 +181,9 @@ export default function BoardView({
   );
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    reloadAfterMove.current = false; // novější načtení zahrne vše zahozené
+    loadsRunning.current++;
     const [colRes, taskRes, memRes, subRes, labelRes, tlRes, taRes, fuRes, gaRes, grantRes] = await Promise.all([
       supabase
         .from("board_columns")
@@ -216,6 +232,20 @@ export default function BoardView({
         .eq("workspace_id", wsId)
         .eq("user_id", userId),
     ]);
+    loadsRunning.current--;
+    // mezitím novější načtení nebo optimistický přesun — odpověď je zastaralá
+    if (seq !== loadSeq.current) return;
+    // chyba ≠ prázdná nástěnka: necháme, co je vidět, a nic necachujeme
+    if (
+      [colRes, taskRes, memRes, subRes, labelRes, tlRes, taRes, fuRes, gaRes, grantRes].some(
+        (r) => r.error
+      )
+    ) {
+      setLoading(false);
+      setLoadError(true);
+      return;
+    }
+    setLoadError(false);
     const cols = (colRes.data as BoardColumn[]) ?? [];
     const allTasks = (taskRes.data as Task[]) ?? [];
 
@@ -369,19 +399,23 @@ export default function BoardView({
 
   async function addColumn(e: React.FormEvent) {
     e.preventDefault();
-    if (!newColumnName.trim()) return;
+    const name = newColumnName.trim();
+    if (!name || adding.current) return;
+    adding.current = true;
+    setNewColumnName(""); // hned prázdné — druhý Enter už nemá co odeslat
     const last = columns[columns.length - 1];
     const { error } = await supabase.from("board_columns").insert({
       workspace_id: wsId,
       project_id: projectId,
-      name: newColumnName.trim(),
+      name,
       position: posBetween(last?.position, undefined),
     });
+    adding.current = false;
     if (error) {
+      setNewColumnName((cur) => cur || name); // napsaný název nezahodit
       toast("Sloupec se nepodařilo přidat.", "error");
       return;
     }
-    setNewColumnName("");
     load();
   }
 
@@ -421,20 +455,24 @@ export default function BoardView({
 
   async function addCard(colId: string, e: React.FormEvent) {
     e.preventDefault();
-    if (!newCardTitle.trim()) return;
+    const title = newCardTitle.trim();
+    if (!title || adding.current) return;
+    adding.current = true;
+    setNewCardTitle(""); // hned prázdné — druhý Enter už nemá co odeslat
     const list = cards[colId] ?? [];
     const { error } = await supabase.from("tasks").insert({
       workspace_id: wsId,
       project_id: projectId,
       column_id: colId,
-      title: newCardTitle.trim(),
+      title,
       position: posBetween(list[list.length - 1]?.position, undefined),
     });
+    adding.current = false;
     if (error) {
+      setNewCardTitle((cur) => cur || title); // napsaný název nezahodit
       toast("Kartu se nepodařilo přidat.", "error");
       return;
     }
-    setNewCardTitle("");
     load();
   }
 
@@ -445,6 +483,14 @@ export default function BoardView({
   }
 
   // ---------------------------------------------------------------- drag & drop
+
+  /** Před optimistickým přesunem: rozjeté načtení nese stav před ním a po
+   *  doběhnutí by kartu vrátilo zpět — posun sekvence ho zahodí. Pokud nějaké
+   *  běželo, po uložení přesunu se nástěnka načte znovu (reloadAfterMove). */
+  function discardLoads() {
+    if (loadsRunning.current > 0) reloadAfterMove.current = true;
+    loadSeq.current++;
+  }
 
   /** Optimistický přesun karty do cílového sloupce (běžného i automatického):
    *  karta zůstane tam, kam ji uživatel pustil, hned — bez čekání na server
@@ -457,6 +503,7 @@ export default function BoardView({
       waitingTasks.find((t) => t.id === taskId) ??
       doneTasks.find((t) => t.id === taskId);
     if (!moving) return;
+    discardLoads();
     const next = { ...moving, ...patch };
     const drop = (list: Task[]) => list.filter((t) => t.id !== taskId);
     setCards((prev) => {
@@ -498,6 +545,7 @@ export default function BoardView({
     if (toCol.startsWith("__")) return; // automatické sloupce řeší až dragEnd
 
     // optimistický přesun mezi sloupci, ať je vidět "díra"
+    discardLoads();
     setCards((prev) => {
       const moving = prev[fromCol].find((t) => t.id === activeId);
       if (!moving) return prev;
@@ -531,6 +579,7 @@ export default function BoardView({
         reordered[newIndex - 1]?.position,
         reordered[newIndex + 1]?.position
       );
+      discardLoads();
       setColumns(reordered.map((c) => (c.id === moved.id ? { ...c, position } : c)));
       const { error } = await supabase
         .from("board_columns")
@@ -539,7 +588,7 @@ export default function BoardView({
       if (error) {
         toast("Přesun sloupce se neuložil — obnovuji nástěnku.", "error");
         load();
-      }
+      } else if (reloadAfterMove.current) load();
       return;
     }
 
@@ -649,6 +698,7 @@ export default function BoardView({
     const updated = list.map((t) =>
       t.id === activeId ? { ...t, position, column_id: colId } : t
     );
+    discardLoads();
     setCards((prev) => ({ ...prev, [colId]: updated }));
     const { error } = await supabase
       .from("tasks")
@@ -657,10 +707,21 @@ export default function BoardView({
     if (error) {
       toast("Přesun karty se neuložil — obnovuji nástěnku.", "error");
       load();
-    }
+    } else if (reloadAfterMove.current) load(); // zahozené načtení dohnat
   }
 
   if (loading) return <BoardSkeleton />;
+  // chyba a nic dřív načteného: prázdná nástěnka by lhala (a sváděla
+  // k založení „prvního" sloupce znovu) — hláška místo ní
+  if (
+    loadError &&
+    columns.length === 0 &&
+    orphans.length === 0 &&
+    holdTasks.length === 0 &&
+    waitingTasks.length === 0 &&
+    doneTasks.length === 0
+  )
+    return <LoadError onRetry={load} message="Nástěnku se nepodařilo načíst." />;
 
   const filterActive =
     fText.trim() !== "" || fPriority !== 0 || fLabel !== "" || fAssignee !== "";
@@ -750,6 +811,10 @@ export default function BoardView({
           </button>
         )}
       </div>
+
+      {loadError && (
+        <LoadError onRetry={load} message="Nástěnku se nepodařilo obnovit." stale />
+      )}
 
       {orphans.length > 0 && (
         <div className="panel space-y-2 border-amber-300 bg-amber-50 p-3">
