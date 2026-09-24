@@ -43,6 +43,10 @@ export default function ErrorFallback({
           ? "Stránku je potřeba obnovit, aby se načetla."
           : "Nejspíš jen chvilkový výpadek spojení. Běžící timer tím nic nezastaví."}
       </p>
+      {/* kód chyby spáruje hlášení uživatele se záznamem v logu (instrumentation.ts) */}
+      {error?.digest && !newVersion && (
+        <p className="font-mono text-xs text-ink-soft/60">Kód chyby: {error.digest}</p>
+      )}
       <div className="flex justify-center gap-2">
         {!newVersion && (
           <button onClick={() => retry()} className="btn-primary">
