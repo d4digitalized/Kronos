@@ -73,6 +73,9 @@ const COL_PREFIX = "col:";
 const HOLD_COL = "__hold";
 const WAITING_COL = "__waiting";
 const DONE_COL = "__done";
+// hotové karty po dávkách od nejnovějších — starší projekty jich mají stovky
+// a nástěnka je dřív stahovala a vykreslovala všechny
+const DONE_PAGE = 50;
 
 function colDndId(id: string) {
   return `${COL_PREFIX}${id}`;
@@ -113,6 +116,8 @@ export default function BoardView({
   const [holdTasks, setHoldTasks] = useState<Task[]>(cached?.holdTasks ?? []);
   const [waitingTasks, setWaitingTasks] = useState<Task[]>(cached?.waitingTasks ?? []);
   const [doneTasks, setDoneTasks] = useState<Task[]>(cached?.doneTasks ?? []);
+  const [doneLimit, setDoneLimit] = useState(DONE_PAGE);
+  const [doneMore, setDoneMore] = useState(false); // v DB jsou starší hotové
   const [members, setMembers] = useState<Membership[]>(cached?.members ?? []);
   const [loading, setLoading] = useState(!cached);
   const [loadError, setLoadError] = useState(false);
@@ -184,7 +189,7 @@ export default function BoardView({
     const seq = ++loadSeq.current;
     reloadAfterMove.current = false; // novější načtení zahrne vše zahozené
     loadsRunning.current++;
-    const [colRes, taskRes, memRes, subRes, labelRes, tlRes, taRes, fuRes, gaRes, grantRes] = await Promise.all([
+    const [colRes, taskRes, doneRes, memRes, subRes, labelRes, tlRes, taRes, fuRes, gaRes, grantRes] = await Promise.all([
       supabase
         .from("board_columns")
         .select("*")
@@ -195,7 +200,17 @@ export default function BoardView({
         .select("*")
         .eq("project_id", projectId)
         .is("parent_id", null) // podúkoly žijí jen v modalu karty
+        .is("completed_at", null)
         .order("position"),
+      // hotové zvlášť: jen posledních doneLimit, count řekne, jestli je víc
+      supabase
+        .from("tasks")
+        .select("*", { count: "exact" })
+        .eq("project_id", projectId)
+        .is("parent_id", null)
+        .not("completed_at", "is", null)
+        .order("completed_at", { ascending: false })
+        .limit(doneLimit),
       supabase
         .from("workspace_members")
         .select(
@@ -208,10 +223,11 @@ export default function BoardView({
         .eq("project_id", projectId)
         .not("parent_id", "is", null),
       supabase.from("labels").select("*").eq("workspace_id", wsId).order("name"),
+      // štítky jen karet tohoto projektu (dřív celé firmy)
       supabase
         .from("task_labels")
-        .select("task_id, labels!inner(id, workspace_id, name)")
-        .eq("labels.workspace_id", wsId),
+        .select("task_id, labels!inner(id, workspace_id, name), tasks!inner(project_id)")
+        .eq("tasks.project_id", projectId),
       supabase
         .from("task_assignees")
         .select("task_id, user_id, tasks!inner(project_id)")
@@ -237,7 +253,7 @@ export default function BoardView({
     if (seq !== loadSeq.current) return;
     // chyba ≠ prázdná nástěnka: necháme, co je vidět, a nic necachujeme
     if (
-      [colRes, taskRes, memRes, subRes, labelRes, tlRes, taRes, fuRes, gaRes, grantRes].some(
+      [colRes, taskRes, doneRes, memRes, subRes, labelRes, tlRes, taRes, fuRes, gaRes, grantRes].some(
         (r) => r.error
       )
     ) {
@@ -247,7 +263,9 @@ export default function BoardView({
     }
     setLoadError(false);
     const cols = (colRes.data as BoardColumn[]) ?? [];
-    const allTasks = (taskRes.data as Task[]) ?? [];
+    const doneRows = (doneRes.data as Task[]) ?? [];
+    const allTasks = [...((taskRes.data as Task[]) ?? []), ...doneRows];
+    setDoneMore((doneRes.count ?? 0) > doneRows.length);
 
     const counts: Record<string, { done: number; total: number }> = {};
     for (const sub of subRes.data ?? []) {
@@ -372,7 +390,7 @@ export default function BoardView({
       subCounts: counts,
       wsLabels: (labelRes.data as Label[]) ?? [],
     } satisfies BoardSnapshot);
-  }, [supabase, projectId, wsId, userId, isAdmin, cacheKey]);
+  }, [supabase, projectId, wsId, userId, isAdmin, cacheKey, doneLimit]);
 
   useEffect(() => {
     load();
@@ -994,6 +1012,15 @@ export default function BoardView({
                     onStart={startCard}
                   />
                 ))}
+                {doneMore && (
+                  <button
+                    type="button"
+                    onClick={() => setDoneLimit((n) => n + DONE_PAGE)}
+                    className="rounded-md px-2 py-1.5 text-xs text-ink-soft hover:bg-black/5"
+                  >
+                    Načíst starší hotové…
+                  </button>
+                )}
               </div>
             </SortableContext>
           </VirtualColumn>

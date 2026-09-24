@@ -26,33 +26,31 @@ export default function CardChecklists({
   const addingItem = useRef(false);
 
   const load = useCallback(async () => {
-    const { data: listData, error } = await supabase
+    // seznamy i jejich položky jedním dotazem (dřív dva za sebou a chyba
+    // druhého se tiše spolkla — seznamy pak vypadaly prázdné)
+    const { data, error } = await supabase
       .from("checklists")
-      .select("*")
+      .select("*, checklist_items(*)")
       .eq("task_id", taskId)
       .order("position")
-      .order("created_at");
-    // tabulky nemusí existovat před migrací — tiše degraduj
+      .order("created_at")
+      .order("position", { referencedTable: "checklist_items" })
+      .order("created_at", { referencedTable: "checklist_items" });
+    // chyba ≠ prázdné seznamy — necháme, co je vidět
     if (error) return;
-    const cl = (listData as Checklist[]) ?? [];
-    setLists(cl);
-    if (cl.length === 0) {
-      setItems({});
-      return;
-    }
-    const { data: itemData } = await supabase
-      .from("checklist_items")
-      .select("*")
-      .in(
-        "checklist_id",
-        cl.map((c) => c.id)
-      )
-      .order("position")
-      .order("created_at");
+    const rows = (data ?? []) as (Checklist & { checklist_items: ChecklistItem[] | null })[];
     const byList: ItemsByList = {};
-    for (const it of (itemData as ChecklistItem[]) ?? []) {
-      byList[it.checklist_id] = [...(byList[it.checklist_id] ?? []), it];
-    }
+    for (const row of rows) byList[row.id] = row.checklist_items ?? [];
+    setLists(
+      rows.map((row) => ({
+        id: row.id,
+        workspace_id: row.workspace_id,
+        task_id: row.task_id,
+        title: row.title,
+        position: row.position,
+        created_at: row.created_at,
+      }))
+    );
     setItems(byList);
   }, [supabase, taskId]);
 

@@ -7,6 +7,7 @@ import { toast } from "@/lib/toast";
 import { pingNotifyEmails } from "@/lib/notify";
 import { PRIORITIES } from "@/lib/priority";
 import { cacheGet, cacheSet } from "@/lib/viewCache";
+import { fetchAllRows } from "@/lib/fetchAll";
 import { TASKS_CHANGED_EVENT } from "@/lib/tasksChanged";
 import { ProjectDot } from "@/components/ProjectPicker";
 import Avatar from "@/components/Avatar";
@@ -88,13 +89,22 @@ export default function TasksView({
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
+    // Výchozí „Aktivní" stahuje jen otevřené úkoly a jejich řešitele — dřív
+    // šla celá historie firmy včetně hotových a filtrovalo se až tady.
+    // Vše stránkovaně: nad 1000 řádků by Supabase zbytek tiše zahodil
+    // (a členovi by pak zmizely úkoly s oříznutými řešiteli).
+    const onlyOpen = fStatus === "active";
     const [taskRes, projRes, memRes, taRes, grantRes, contactRes, tcaRes] =
       await Promise.all([
-      supabase
-        .from("tasks")
-        .select("*, projects(name, position), board_columns(name)")
-        .eq("workspace_id", wsId)
-        .is("parent_id", null),
+      fetchAllRows<Task>((a, b) => {
+        let q = supabase
+          .from("tasks")
+          .select("*, projects(name, position), board_columns(name)")
+          .eq("workspace_id", wsId)
+          .is("parent_id", null);
+        if (onlyOpen) q = q.is("completed_at", null);
+        return q.order("created_at").order("id").range(a, b);
+      }),
       supabase
         .from("projects")
         .select("*")
@@ -108,20 +118,28 @@ export default function TasksView({
           "*, profiles(id, email, full_name, is_super_admin, avatar_initials, avatar_color, tag_name)"
         )
         .eq("workspace_id", wsId),
-      supabase
-        .from("task_assignees")
-        .select("task_id, user_id, tasks!inner(workspace_id)")
-        .eq("tasks.workspace_id", wsId),
+      fetchAllRows<{ task_id: string; user_id: string }>((a, b) => {
+        let q = supabase
+          .from("task_assignees")
+          .select("task_id, user_id, tasks!inner(workspace_id, completed_at)")
+          .eq("tasks.workspace_id", wsId);
+        if (onlyOpen) q = q.is("tasks.completed_at", null);
+        return q.order("task_id").order("user_id").range(a, b);
+      }),
       supabase
         .from("assign_grants")
         .select("target_id")
         .eq("workspace_id", wsId)
         .eq("user_id", userId),
       supabase.from("contacts").select("*").eq("workspace_id", wsId).order("name"),
-      supabase
-        .from("task_contact_assignees")
-        .select("task_id, contact_id, tasks!inner(workspace_id)")
-        .eq("tasks.workspace_id", wsId),
+      fetchAllRows<{ task_id: string; contact_id: string }>((a, b) => {
+        let q = supabase
+          .from("task_contact_assignees")
+          .select("task_id, contact_id, tasks!inner(workspace_id, completed_at)")
+          .eq("tasks.workspace_id", wsId);
+        if (onlyOpen) q = q.is("tasks.completed_at", null);
+        return q.order("task_id").order("contact_id").range(a, b);
+      }),
     ]);
     if (seq !== loadSeq.current) return;
     // chyba ≠ „žádné úkoly": necháme, co je vidět, a nic necachujeme
@@ -133,7 +151,7 @@ export default function TasksView({
       return;
     }
     setLoadError(false);
-    const nextTasks = (taskRes.data as Task[]) ?? [];
+    const nextTasks = taskRes.data;
     const nextProjects = (projRes.data as Project[]) ?? [];
     const nextMembers = (memRes.data as unknown as Membership[]) ?? [];
     const byTask: Record<string, string[]> = {};
@@ -164,7 +182,7 @@ export default function TasksView({
       ghostAssignees: ghostByTask,
     });
     setLoading(false);
-  }, [supabase, wsId, userId, cacheKey]);
+  }, [supabase, wsId, userId, cacheKey, fStatus]);
 
   useEffect(() => {
     load();
