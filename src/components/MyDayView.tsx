@@ -311,6 +311,12 @@ export default function MyDayView({
   // pořadí načítání: při listování týdny nesmí pozdě doběhlý dřívější týden
   // přepsat ten, na který se právě díváš
   const loadSeq = useRef(0);
+  // optimistická změna: načtení rozběhnuté před zápisem (nebo doběhlé během
+  // něj) nese stav před ní a po doběhnutí by ji vrátilo — zahodí se
+  // a po zápisu se načte znovu (saveOptimistic)
+  const loadsRunning = useRef(0);
+  const writesPending = useRef(0);
+  const reloadAfterWrite = useRef(false);
   const [dragging, setDragging] = useState<DragData | null>(null);
   const [resizing, setResizing] = useState<{
     taskId: string;
@@ -328,6 +334,7 @@ export default function MyDayView({
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
+    loadsRunning.current++;
     const fromISO = weekStart.toISOString();
     const toISO = weekEnd.toISOString();
     const fromDay = isoDay(weekStart);
@@ -363,7 +370,12 @@ export default function MyDayView({
         .is("tasks.planned_start", null)
         .is("tasks.parent_id", null),
     ]);
+    loadsRunning.current--;
     if (seq !== loadSeq.current) return;
+    if (writesPending.current > 0) {
+      reloadAfterWrite.current = true; // dotáhne se po zápisu
+      return;
+    }
     // chyba ≠ prázdný týden: necháme, co je vidět, a nic necachujeme
     if (mineRes.error || createdRes.error || dueRes.error || candRes.error) {
       setLoading(false);
@@ -470,14 +482,32 @@ export default function MyDayView({
     []
   );
 
+  /** Zápis po optimistické změně (viz loadsRunning). Při chybě načítá
+      volající sám — vrací skutečný stav. */
+  async function saveOptimistic<T extends { error: unknown }>(write: () => PromiseLike<T>) {
+    if (loadsRunning.current > 0) reloadAfterWrite.current = true;
+    loadSeq.current++;
+    writesPending.current++;
+    const res = await Promise.resolve(write()).finally(() => {
+      writesPending.current--;
+    });
+    if (writesPending.current === 0 && reloadAfterWrite.current) {
+      reloadAfterWrite.current = false;
+      if (!res.error) load();
+    }
+    return res;
+  }
+
   /** Uloží nové okno: nejdřív lokálně (hned vidět), pak DB + kalendář. */
   async function persistPlan(task: PlannedTask, startISO: string, endISO: string) {
     upsertLocal(task, startISO, endISO);
     setPlanFor(null);
-    const { error } = await supabase
-      .from("tasks")
-      .update({ planned_start: startISO, planned_end: endISO })
-      .eq("id", task.id);
+    const { error } = await saveOptimistic(() =>
+      supabase
+        .from("tasks")
+        .update({ planned_start: startISO, planned_end: endISO })
+        .eq("id", task.id)
+    );
     if (error) {
       toast("Naplánování se nezdařilo.", "error");
       load(); // vrátit skutečný stav
@@ -557,10 +587,12 @@ export default function MyDayView({
         ...prev.filter((c) => c.id !== task.id),
       ]);
     }
-    const { error } = await supabase
-      .from("tasks")
-      .update({ planned_start: null, planned_end: null })
-      .eq("id", task.id);
+    const { error } = await saveOptimistic(() =>
+      supabase
+        .from("tasks")
+        .update({ planned_start: null, planned_end: null })
+        .eq("id", task.id)
+    );
     if (error) {
       toast("Odnaplánování se nezdařilo.", "error");
       load();

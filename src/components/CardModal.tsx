@@ -195,6 +195,9 @@ export default function CardModal({
   const changedRef = useRef(false);
   const closeRef = useRef<() => void>(() => {});
   const closingRef = useRef(false); // zavírání čeká na uložení — neopakovat
+  // text v polích pro odchod bez zavření karty (Zpět v prohlížeči, menu)
+  const latestText = useRef({ title: task.title, description: task.description });
+  const discardedRef = useRef(false); // zavřeno „bez uložení" — nedopisovat
   const addingSubtask = useRef(false); // druhý Enter nesmí založit podúkol znovu
   // debounce autosave popisu — ukládá se během psaní, ne až při opuštění pole
   const descTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -231,6 +234,36 @@ export default function CardModal({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [description]);
+
+  useEffect(() => {
+    latestText.current = { title, description };
+  }, [title, description]);
+
+  // Zpět v prohlížeči nebo odkaz v menu kartu odstraní bez close() — onBlur
+  // ani debounce popisu už nepřijdou. Rozepsané se dopíše na pozadí (fronta
+  // zápisů i klient žijí dál; při chybě ohlásí toast).
+  useEffect(
+    () => () => {
+      if (discardedRef.current) return;
+      const { title: t, description: d } = latestText.current;
+      saveText("title", t.trim() || task.title);
+      saveText("description", d);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
+  // zavření záložky nebo reload s neuloženým textem: prohlížeč se zeptá
+  useEffect(() => {
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      const { title: t, description: d } = latestText.current;
+      const saved = savedRef.current;
+      if ((t.trim() || task.title) !== saved.title || d !== saved.description)
+        e.preventDefault();
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [task.title]);
 
   const loadComments = useCallback(async () => {
     const { data } = await supabase
@@ -713,6 +746,7 @@ export default function CardModal({
     if (closingRef.current) return;
     closingRef.current = true;
     try {
+      let discardText = false;
       // uložení selhalo (toast už byl) → zavřít jen na výslovné přání,
       // jinak karta zůstane otevřená a text se dá zkusit uložit znovu
       if (!(await flushPending())) {
@@ -723,6 +757,7 @@ export default function CardModal({
           confirmLabel: "Zavřít",
         });
         if (!discard) return;
+        discardText = true;
       }
       if (newComment.trim()) {
         const discard = await confirmDialog({
@@ -732,6 +767,7 @@ export default function CardModal({
         });
         if (!discard) return;
       }
+      discardedRef.current = discardText;
       if (changedRef.current) onChanged();
       else onClose();
     } finally {

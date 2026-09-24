@@ -64,6 +64,12 @@ export default function PriorityListView({
   const [loadError, setLoadError] = useState(false);
   // pořadí načítání: starší odpověď nesmí přepsat novější
   const loadSeq = useRef(0);
+  // optimistická změna: načtení rozběhnuté před zápisem (nebo doběhlé během
+  // něj) nese stav před ní a po doběhnutí by ji vrátilo — zahodí se
+  // a po zápisu se načte znovu (saveOptimistic)
+  const loadsRunning = useRef(0);
+  const writesPending = useRef(0);
+  const reloadAfterWrite = useRef(false);
   const [openTask, setOpenTask] = useState<Task | null>(null);
   // členové firmy otevřené karty — seznam míchá firmy, `members` jsou jen
   // z aktuální; ostatní firmy se dotáhnou při otevření (cache per firma)
@@ -83,6 +89,7 @@ export default function PriorityListView({
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
+    loadsRunning.current++;
     const [mineRes, memRes, fuRes, orderRes] = await Promise.all([
       supabase
         .from("task_assignees")
@@ -104,7 +111,12 @@ export default function PriorityListView({
         .select("task_id, position")
         .eq("user_id", userId),
     ]);
+    loadsRunning.current--;
     if (seq !== loadSeq.current) return;
+    if (writesPending.current > 0) {
+      reloadAfterWrite.current = true; // dotáhne se po zápisu
+      return;
+    }
     // chyba ≠ „žádné úkoly": necháme, co je vidět, a nic necachujeme
     if (mineRes.error || memRes.error || fuRes.error || orderRes.error) {
       setLoading(false);
@@ -195,6 +207,22 @@ export default function PriorityListView({
     setActiveTask(tasks.find((t) => t.id === String(event.active.id)) ?? null);
   }
 
+  /** Zápis po optimistické změně (viz loadsRunning). Při chybě načítá
+      volající sám — vrací skutečný stav. */
+  async function saveOptimistic<T extends { error: unknown }>(write: () => PromiseLike<T>) {
+    if (loadsRunning.current > 0) reloadAfterWrite.current = true;
+    loadSeq.current++;
+    writesPending.current++;
+    const res = await Promise.resolve(write()).finally(() => {
+      writesPending.current--;
+    });
+    if (writesPending.current === 0 && reloadAfterWrite.current) {
+      reloadAfterWrite.current = false;
+      if (!res.error) load();
+    }
+    return res;
+  }
+
   /** Uloží jen přetažený řádek — pozici mezi sousedy. Sousedé, kteří ještě
       nemají vlastní pořadí, ho dostanou taky, aby seznam držel tvar. */
   async function handleDragEnd(event: DragEndEvent) {
@@ -214,9 +242,9 @@ export default function PriorityListView({
       position: (i + 1) * 1000,
       updated_at: new Date().toISOString(),
     }));
-    const { error } = await supabase
-      .from("task_priority")
-      .upsert(rows, { onConflict: "user_id,task_id" });
+    const { error } = await saveOptimistic(() =>
+      supabase.from("task_priority").upsert(rows, { onConflict: "user_id,task_id" })
+    );
     if (error) {
       toast("Pořadí se neuložilo — obnovuji seznam.", "error");
       load();
