@@ -1087,6 +1087,27 @@ export function registerTools(server: McpServer): void {
   );
 
   // ---------------------------------------------------------------- čas
+  // Start/stop jdou přes funkce timer_* v DB (migrace 0044) — stejně jako
+  // lišta v aplikaci: jedna transakce, čas serveru, zámek na uživatele, takže
+  // se MCP a web nepřetahují a chyba nezůstane viset napůl.
+
+  type TimerRow = {
+    id: string;
+    started_at: string;
+    stopped_at: string | null;
+    description: string;
+    workspace_id: string;
+    project_id: string | null;
+    task_id: string | null;
+    projects: { name: string } | null;
+    tasks: { title: string } | null;
+  };
+  const timerFail = (what: string, error: { code?: string; message: string }) =>
+    fail(
+      error.code === "PGRST202"
+        ? `${what}: v databázi chybí funkce timeru (migrace 0044).`
+        : `${what}: ${error.message}`
+    );
 
   server.registerTool(
     "current_timer",
@@ -1097,26 +1118,11 @@ export function registerTools(server: McpServer): void {
       inputSchema: {},
     },
     async (_args, extra) => {
-      const { client, userId } = clientFor(extra);
-      const { data, error } = await client
-        .from("time_entries")
-        .select("id, started_at, description, workspace_id, project_id, task_id, projects(name), tasks(title)")
-        .eq("user_id", userId)
-        .is("stopped_at", null)
-        .maybeSingle();
-      if (error) return fail(error.message);
-      if (!data) return ok({ running: false });
-      type Row = {
-        id: string;
-        started_at: string;
-        description: string;
-        workspace_id: string;
-        project_id: string | null;
-        task_id: string | null;
-        projects: { name: string } | null;
-        tasks: { title: string } | null;
-      };
-      const e = data as unknown as Row;
+      const { client } = clientFor(extra);
+      const { data, error } = await client.rpc("timer_current");
+      if (error) return timerFail("Běžící timer se nepodařilo zjistit", error);
+      const e = (data as { entry: TimerRow | null }).entry;
+      if (!e) return ok({ running: false });
       return ok({
         running: true,
         entry_id: e.id,
@@ -1146,7 +1152,7 @@ export function registerTools(server: McpServer): void {
       },
     },
     async ({ task_id, project_id, workspace_id, description }, extra) => {
-      const { client, userId } = clientFor(extra);
+      const { client } = clientFor(extra);
       let wsId = workspace_id ?? null;
       let projId = project_id ?? null;
       let taskTitle: string | null = null;
@@ -1157,8 +1163,11 @@ export function registerTools(server: McpServer): void {
           .eq("id", task_id)
           .maybeSingle();
         if (!t) return fail("Úkol nenalezen nebo k němu nemáš přístup.");
+        // záznam patří k projektu úkolu — jiný projekt by rozbil přehledy
+        if (projId && t.project_id && projId !== t.project_id)
+          return fail("project_id nepatří k zadanému úkolu — vynech ho, dohledá se z úkolu.");
         wsId = t.workspace_id;
-        projId = projId ?? t.project_id;
+        projId = t.project_id ?? projId;
         taskTitle = t.title;
       } else if (projId) {
         const { data: p } = await client
@@ -1171,40 +1180,25 @@ export function registerTools(server: McpServer): void {
       }
       if (!wsId) return fail("Zadej task_id, project_id nebo workspace_id.");
 
-      // zastavit běžící timer
-      const stoppedAt = new Date().toISOString();
-      const { data: running } = await client
-        .from("time_entries")
-        .select("id, started_at")
-        .eq("user_id", userId)
-        .is("stopped_at", null)
-        .maybeSingle();
-      if (running) {
-        await client
-          .from("time_entries")
-          .update({ stopped_at: stoppedAt })
-          .eq("id", running.id);
-      }
-
-      const { data, error } = await client
-        .from("time_entries")
-        .insert({
-          workspace_id: wsId,
-          project_id: projId,
-          task_id: task_id ?? null,
-          description: description ?? "",
-          user_id: userId,
-        })
-        .select("id, started_at")
-        .single();
-      if (error || !data) return fail("Timer se nepodařilo spustit: " + (error?.message ?? ""));
+      // zastavení běžícího i založení nového v jedné transakci
+      const { data, error } = await client.rpc("timer_start", {
+        p_workspace: wsId,
+        p_project: projId,
+        p_task: task_id ?? null,
+        p_description: description ?? "",
+      });
+      if (error) return timerFail("Timer se nepodařilo spustit", error);
+      const res = data as { entry: TimerRow; previous: TimerRow | null };
       return ok({
         started: true,
-        entry_id: data.id,
+        entry_id: res.entry.id,
         task: taskTitle,
-        started_at: pragueStamp(data.started_at),
-        previous_stopped: running
-          ? { entry_id: running.id, minutes: minutes(running.started_at, stoppedAt) }
+        started_at: pragueStamp(res.entry.started_at),
+        previous_stopped: res.previous
+          ? {
+              entry_id: res.previous.id,
+              minutes: minutes(res.previous.started_at, res.previous.stopped_at),
+            }
           : null,
       });
     }
@@ -1221,27 +1215,17 @@ export function registerTools(server: McpServer): void {
       },
     },
     async ({ description }, extra) => {
-      const { client, userId } = clientFor(extra);
-      const { data: running } = await client
-        .from("time_entries")
-        .select("id, started_at")
-        .eq("user_id", userId)
-        .is("stopped_at", null)
-        .maybeSingle();
-      if (!running) return ok({ stopped: false, note: "Žádný timer neběží." });
-      const stoppedAt = new Date().toISOString();
-      const { error } = await client
-        .from("time_entries")
-        .update({
-          stopped_at: stoppedAt,
-          ...(description !== undefined ? { description } : {}),
-        })
-        .eq("id", running.id);
-      if (error) return fail("Timer se nepodařilo zastavit: " + error.message);
+      const { client } = clientFor(extra);
+      const { data, error } = await client.rpc("timer_stop", {
+        p_description: description ?? null,
+      });
+      if (error) return timerFail("Timer se nepodařilo zastavit", error);
+      const stopped = (data as { stopped: TimerRow | null }).stopped;
+      if (!stopped) return ok({ stopped: false, note: "Žádný timer neběží." });
       return ok({
         stopped: true,
-        entry_id: running.id,
-        minutes: minutes(running.started_at, stoppedAt),
+        entry_id: stopped.id,
+        minutes: minutes(stopped.started_at, stopped.stopped_at),
       });
     }
   );
