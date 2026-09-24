@@ -14,6 +14,7 @@ import Picker from "@/components/Picker";
 import Avatar, { AVATAR_COLORS, avatarInitials } from "@/components/Avatar";
 import ContactsSection from "@/components/ContactsSection";
 import { toast } from "@/lib/toast";
+import { safeAction } from "@/lib/safeAction";
 import { confirmDialog } from "@/lib/confirm";
 import type { Membership, Role } from "@/lib/types";
 import { ListSkeleton } from "@/components/Skeletons";
@@ -55,7 +56,7 @@ export default function MembersView({
   const [eTag, setETag] = useState("");
 
   const load = useCallback(async () => {
-    const [{ data }, addable] = await Promise.all([
+    const [{ data, error }, addable] = await Promise.all([
       supabase
         .from("workspace_members")
         .select(
@@ -63,11 +64,17 @@ export default function MembersView({
         )
         .eq("workspace_id", wsId)
         .order("role"),
-      listAddablePortalUsers(wsId),
+      // bez safeAction by selhaná akce (stará záložka) nechala skeleton navždy
+      safeAction(() => listAddablePortalUsers(wsId)),
     ]);
+    setLoading(false);
+    // chyba ≠ „žádní členové" — nechat, co je vidět
+    if (error) {
+      toast("Členy se nepodařilo načíst.", "error");
+      return;
+    }
     setMembers((data as unknown as Membership[]) ?? []);
     setPortalUsers(addable.users ?? []);
-    setLoading(false);
   }, [supabase, wsId]);
 
   useEffect(() => {
@@ -77,7 +84,7 @@ export default function MembersView({
   const loadAll = useCallback(async () => {
     setAllLoading(true);
     setAllError(null);
-    const result = await listAllUsers();
+    const result = await safeAction(() => listAllUsers());
     if (result.error) setAllError(result.error);
     else setAllUsers(result.users ?? []);
     setAllLoading(false);
@@ -99,7 +106,8 @@ export default function MembersView({
       return;
     }
     startTransition(async () => {
-      const result = await inviteMember(wsId, targetEmail, role);
+      // výjimka uvnitř transition by shodila stránku na chybovou hranici
+      const result = await safeAction(() => inviteMember(wsId, targetEmail, role));
       setMessage(
         result.error ??
           (result.invited
@@ -115,12 +123,14 @@ export default function MembersView({
   }
 
   async function changeRole(member: Membership, newRole: Role) {
-    const { error } = await supabase
+    // RLS zakázaná změna vrátí 0 řádků bez chyby — kontrolovat výsledek
+    const { data, error } = await supabase
       .from("workspace_members")
       .update({ role: newRole })
       .eq("workspace_id", wsId)
-      .eq("user_id", member.user_id);
-    if (error) setMessage("Roli může měnit jen super-admin.");
+      .eq("user_id", member.user_id)
+      .select("user_id");
+    if (error || !data?.length) setMessage("Roli může měnit jen super-admin.");
     load();
   }
 
@@ -177,12 +187,15 @@ export default function MembersView({
       confirmLabel: "Odebrat",
     });
     if (!ok) return;
-    const { error } = await supabase
+    // RLS zakázané mazání vrátí 204 bez řádků, ne chybu — kontrolovat výsledek
+    const { data, error } = await supabase
       .from("workspace_members")
       .delete()
       .eq("workspace_id", wsId)
-      .eq("user_id", member.user_id);
-    if (error) setMessage("Odebrání se nezdařilo (admina odebírá jen super-admin).");
+      .eq("user_id", member.user_id)
+      .select("user_id");
+    if (error || !data?.length)
+      setMessage("Odebrání se nezdařilo (admina odebírá jen super-admin).");
     load();
   }
 
@@ -603,7 +616,7 @@ function NotifyEmailEditor({
 
   async function save() {
     setSaving(true);
-    const res = await setMemberNotifyEmail(wsId, userId, val.trim());
+    const res = await safeAction(() => setMemberNotifyEmail(wsId, userId, val.trim()));
     setSaving(false);
     if (res.error) {
       toast(res.error, "error");
@@ -670,7 +683,7 @@ function MemberFlagToggle({
 
   async function toggle(next: boolean) {
     setSaving(true);
-    const res = await setMemberFlag(wsId, userId, flag, next);
+    const res = await safeAction(() => setMemberFlag(wsId, userId, flag, next));
     setSaving(false);
     if (res.error) {
       toast(res.error, "error");

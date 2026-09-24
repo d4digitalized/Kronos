@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { toast } from "@/lib/toast";
 import type { Workspace } from "@/lib/types";
 
 export default function WorkspacesAdmin() {
@@ -23,11 +24,22 @@ export default function WorkspacesAdmin() {
     load();
   }, [load]);
 
+  // Enter dvakrát = dvě firmy
+  const adding = useRef(false);
+
   async function add(e: React.FormEvent) {
     e.preventDefault();
-    if (!newName.trim()) return;
-    await supabase.from("workspaces").insert({ name: newName.trim() });
+    const name = newName.trim();
+    if (!name || adding.current) return;
+    adding.current = true;
     setNewName("");
+    const { error } = await supabase.from("workspaces").insert({ name });
+    adding.current = false;
+    if (error) {
+      setNewName(name);
+      toast("Firmu se nepodařilo založit.", "error");
+      return;
+    }
     load();
   }
 

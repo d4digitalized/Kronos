@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { toast } from "@/lib/toast";
 import { confirmDialog } from "@/lib/confirm";
@@ -35,13 +35,18 @@ export default function ContactsSection({ wsId }: { wsId: string }) {
     load();
   }, [load]);
 
+  // Enter dvakrát = dva kontakty
+  const adding = useRef(false);
+
   async function add(e: React.FormEvent) {
     e.preventDefault();
     const n = name.trim();
-    if (!n) return;
+    if (!n || adding.current) return;
+    adding.current = true;
     const { error } = await supabase
       .from("contacts")
       .insert({ workspace_id: wsId, name: n, email: email.trim() });
+    adding.current = false;
     if (error) {
       toast("Kontakt se nepodařilo založit.", "error");
       return;
@@ -105,7 +110,7 @@ export default function ContactsSection({ wsId }: { wsId: string }) {
       <div>
         <h2 className="font-display text-base font-semibold">Externí kontakty</h2>
         <p className="text-xs text-ink-soft/70">
-          Lidé bez účtu, na které lze delegovat úkoly („Čekám na…" na kartě).
+          Lidé bez účtu, na které lze delegovat úkoly („Čekám na…“ na kartě).
           Se systémem nijak neinteragují.
         </p>
       </div>

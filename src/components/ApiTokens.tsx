@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { toast } from "@/lib/toast";
 import { createApiToken } from "@/app/actions/tokens";
+import { safeAction } from "@/lib/safeAction";
 
 type Row = {
   id: string;
@@ -45,7 +46,7 @@ export default function ApiTokens() {
 
   async function create() {
     setCreating(true);
-    const res = await createApiToken(name);
+    const res = await safeAction(() => createApiToken(name));
     setCreating(false);
     if (res.error || !res.plain) {
       toast(res.error ?? "Token se nepodařilo vytvořit.", "error");

@@ -3,6 +3,7 @@
 import { useEffect, useState, useTransition } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { inviteToWorkspaces } from "@/app/actions/members";
+import { safeAction } from "@/lib/safeAction";
 import type { Role, Workspace } from "@/lib/types";
 
 export default function InviteToWorkspacesAdmin() {
@@ -36,7 +37,8 @@ export default function InviteToWorkspacesAdmin() {
     e.preventDefault();
     setMessage(null);
     startTransition(async () => {
-      const result = await inviteToWorkspaces(email, role, [...selected]);
+      // výjimka uvnitř transition by shodila stránku na chybovou hranici
+      const result = await safeAction(() => inviteToWorkspaces(email, role, [...selected]));
       if (result.error) {
         setMessage(result.error);
         return;

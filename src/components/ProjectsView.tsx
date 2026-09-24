@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { toast } from "@/lib/toast";
 import { confirmDialog } from "@/lib/confirm";
@@ -38,6 +38,11 @@ export default function ProjectsView({ wsId }: { wsId: string }) {
   const [membersFor, setMembersFor] = useState<string | null>(null);
   const [assigned, setAssigned] = useState<Set<string>>(new Set());
   const [assignedLoading, setAssignedLoading] = useState(false);
+  // rychlé přepnutí projektu: pozdní odpověď předchozího nesmí přepsat členy
+  // právě otevřeného (zaškrtávání by pak přidávalo/odebíralo podle špatné sady)
+  const membersSeq = useRef(0);
+  // Enter dvakrát = dva projekty
+  const adding = useRef(false);
 
   const load = useCallback(async () => {
     const [projectsRes, membersRes, pmRes, catRes] = await Promise.all([
@@ -89,13 +94,21 @@ export default function ProjectsView({ wsId }: { wsId: string }) {
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
-    if (!newName.trim()) return;
-    await supabase.from("projects").insert({
+    const name = newName.trim();
+    if (!name || adding.current) return;
+    adding.current = true;
+    setNewName("");
+    const { error } = await supabase.from("projects").insert({
       workspace_id: wsId,
-      name: newName.trim(),
+      name,
       position: Math.max(0, ...projects.map((p) => p.position)) + 1,
     });
-    setNewName("");
+    adding.current = false;
+    if (error) {
+      setNewName(name);
+      toast("Projekt se nepodařilo založit.", "error");
+      return;
+    }
     load();
   }
 
@@ -281,12 +294,20 @@ export default function ProjectsView({ wsId }: { wsId: string }) {
       setMembersFor(null);
       return;
     }
+    const seq = ++membersSeq.current;
     setMembersFor(project.id);
     setAssignedLoading(true);
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("project_members")
       .select("user_id")
       .eq("project_id", project.id);
+    if (seq !== membersSeq.current) return;
+    if (error) {
+      toast("Členy projektu se nepodařilo načíst.", "error");
+      setMembersFor(null);
+      setAssignedLoading(false);
+      return;
+    }
     setAssigned(new Set((data ?? []).map((r) => r.user_id as string)));
     setAssignedLoading(false);
   }
