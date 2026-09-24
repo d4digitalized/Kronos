@@ -7,12 +7,14 @@ export default async function Home() {
   if (!user) redirect("/login");
   const supabase = await createClient();
 
-  const { data: memberships } = await supabase
+  const { data: memberships, error } = await supabase
     .from("workspace_members")
     .select("workspace_id")
     .eq("user_id", user.id)
     .order("created_at", { ascending: true })
     .limit(1);
+  // chyba dotazu ≠ „nejsi členem" — ať se neukáže hláška jako po vyřazení
+  if (error) throw new Error(`Členství se nepodařilo načíst: ${error.message}`);
 
   if (memberships && memberships.length > 0) {
     redirect(`/w/${memberships[0].workspace_id}/my`);

@@ -1,6 +1,7 @@
 import { cache } from "react";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { isAuthRetryableFetchError, type SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import { staticJwks } from "@/lib/jwks";
 import type { Membership, Profile, Workspace, WorkspaceOption } from "@/lib/types";
 
 // Přihlášený uživatel a jeho práva ve firmě — JEDNOU na požadavek.
@@ -19,33 +20,20 @@ export type SessionUser = {
   googleLinked: boolean;
 };
 
-/** Volitelně statické JWKS (env SUPABASE_JWKS = JSON z
-    /auth/v1/.well-known/jwks.json) — ušetří jeden fetch na studeném startu.
-    Když klíč nesedí (rotace), knihovna si JWKS stejně stáhne sama. */
-type ClaimsOptions = NonNullable<Parameters<SupabaseClient["auth"]["getClaims"]>[1]>;
-type Jwks = NonNullable<ClaimsOptions["jwks"]>;
-
-function staticJwks(): Jwks | undefined {
-  const raw = process.env.SUPABASE_JWKS;
-  if (!raw) return undefined;
-  try {
-    const parsed = JSON.parse(raw) as Partial<Jwks>;
-    return Array.isArray(parsed?.keys) ? (parsed as Jwks) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /** Ověří session z cookies bez cesty na Supabase Auth (u HS256 tokenů
     knihovna sama spadne zpět na getUser). */
 export async function readSessionUser(
   supabase: SupabaseClient
 ): Promise<SessionUser | null> {
   const jwks = staticJwks();
-  const { data } = await supabase.auth.getClaims(
+  const { data, error } = await supabase.auth.getClaims(
     undefined,
     jwks ? { jwks } : undefined
   );
+  // výpadek spojení se Supabase ≠ odhlášení: vyhodit chybu (error.tsx nabídne
+  // „Zkusit znovu") místo přesměrování na přihlášení
+  if (error && isAuthRetryableFetchError(error))
+    throw new Error("Přihlášení se teď nepodařilo ověřit (spojení se Supabase).");
   const claims = data?.claims;
   if (!claims?.sub) return null;
   const meta = claims.app_metadata as { providers?: string[] } | undefined;
@@ -96,12 +84,7 @@ export const getWsContext = cache(
     if (!user) return null;
     const supabase = await createClient();
 
-    const [
-      { data: profile },
-      { data: ws },
-      { data: memberships },
-      { count: grantCount },
-    ] = await Promise.all([
+    const [profileRes, wsRes, membershipsRes, grantsRes] = await Promise.all([
       supabase.from("profiles").select("*").eq("id", user.id).single(),
       supabase.from("workspaces").select("id, name").eq("id", wsId).maybeSingle(),
       supabase
@@ -114,8 +97,21 @@ export const getWsContext = cache(
         .eq("workspace_id", wsId)
         .eq("user_id", user.id),
     ]);
+    // Chyba dotazu ≠ „firma neexistuje" / „nejsi člen": dřív z ní byla 404
+    // nebo přesměrování pryč. Teď skončí v error.tsx se „Zkusit znovu".
+    // (PGRST116 = profil bez řádku — to není chyba spojení.)
+    const failed = [
+      profileRes.error?.code === "PGRST116" ? null : profileRes.error,
+      wsRes.error,
+      membershipsRes.error,
+      grantsRes.error,
+    ].find(Boolean);
+    if (failed) throw new Error(`Kontext firmy se nepodařilo načíst: ${failed.message}`);
+    const profile = profileRes.data;
+    const ws = wsRes.data;
+    const grantCount = grantsRes.count;
 
-    const all = (memberships ?? []) as unknown as Membership[];
+    const all = (membershipsRes.data ?? []) as unknown as Membership[];
     const membership = all.find((m) => m.workspace_id === wsId) ?? null;
     const isSuperAdmin = profile?.is_super_admin ?? false;
     const isAdmin = isSuperAdmin || membership?.role === "admin";

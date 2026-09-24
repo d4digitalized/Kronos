@@ -1,5 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
+import { isAuthRetryableFetchError } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
+import { staticJwks } from "@/lib/jwks";
 
 // /api/cron chrání CRON_SECRET (Bearer), /api/inbound svix podpis webooku,
 // /api/mcp vlastní bearer API token (withMcpAuth), /api/oauth + /oauth + /.well-known
@@ -43,11 +45,20 @@ export async function proxy(request: NextRequest) {
   // projektu), bez round-tripu na Supabase Auth při každém požadavku.
   // Prošlý access token se přitom pořád obnoví (getSession uvnitř) a nové
   // cookies se propíšou přes setAll výš.
-  const { data } = await supabase.auth.getClaims();
+  const jwks = staticJwks();
+  const { data, error } = await supabase.auth.getClaims(
+    undefined,
+    jwks ? { jwks } : undefined
+  );
   const signedIn = !!data?.claims?.sub;
 
   const { pathname } = request.nextUrl;
   const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
+
+  // Chvilková nedostupnost Supabase Auth (síť, JWKS na studeném startu) není
+  // odhlášení — přesměrování na /login by vypadalo jako výpadek. Pustíme dál:
+  // stránka si session ověří znovu a při chybě nabídne „Zkusit znovu".
+  if (!signedIn && error && isAuthRetryableFetchError(error)) return response;
 
   if (!signedIn && !isPublic) {
     const url = request.nextUrl.clone();
