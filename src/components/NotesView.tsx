@@ -18,25 +18,34 @@ export default function NotesView({
   const supabase = createClient();
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(true);
+  // načtení selhalo → needitovat: autosave by uložené poznámky přepsal
+  // tím, co se stihne napsat do prázdného pole
+  const [loadFailed, setLoadFailed] = useState(false);
   const [state, setState] = useState<"idle" | "saving" | "saved">("idle");
   // co je v DB — ať se neukládá zbytečně
   const savedRef = useRef("");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    supabase
+  const load = useCallback(async () => {
+    setLoading(true);
+    const { data, error } = await supabase
       .from("user_notes")
       .select("content")
       .eq("workspace_id", wsId)
       .eq("user_id", userId)
-      .maybeSingle()
-      .then(({ data }) => {
-        const text = (data?.content as string) ?? "";
-        savedRef.current = text;
-        setContent(text);
-        setLoading(false);
-      });
+      .maybeSingle();
+    setLoadFailed(!!error);
+    if (!error) {
+      const text = (data?.content as string) ?? "";
+      savedRef.current = text;
+      setContent(text);
+    }
+    setLoading(false);
   }, [supabase, wsId, userId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const save = useCallback(async () => {
     if (content === savedRef.current) return;
@@ -61,15 +70,26 @@ export default function NotesView({
 
   // debounce: ulož ~800 ms po posledním úhozu
   useEffect(() => {
-    if (loading) return;
+    if (loading || loadFailed) return;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(save, 800);
     return () => {
       if (timer.current) clearTimeout(timer.current);
     };
-  }, [content, loading, save]);
+  }, [content, loading, loadFailed, save]);
 
   if (loading) return <ListSkeleton />;
+
+  if (loadFailed) {
+    return (
+      <p className="flex flex-wrap items-center gap-2 p-4 text-sm text-danger">
+        Poznámky se nepodařilo načíst.
+        <button onClick={load} className="rounded-md px-2 py-1 text-xs underline">
+          Zkusit znovu
+        </button>
+      </p>
+    );
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col space-y-3">

@@ -133,16 +133,18 @@ export default function PercentReportView({
       return;
     }
     setSaving(true);
-    // den se přepisuje celý — jiné než výkazové záznamy v tomhle režimu nevznikají
+    // den se přepisuje celý — jiné než výkazové záznamy v tomhle režimu nevznikají.
+    // Nové bloky se nejdřív vloží a staré smažou až pak podle id: dřív se
+    // den nejdřív smazal, a když pak vložení spadlo, výkaz dne zmizel.
     const dayStart = new Date(`${day}T00:00:00`);
-    const { error: delError } = await supabase
+    const { data: old, error: oldError } = await supabase
       .from("time_entries")
-      .delete()
+      .select("id")
       .eq("user_id", userId)
       .eq("workspace_id", wsId)
       .gte("started_at", dayStart.toISOString())
       .lt("started_at", addDays(dayStart, 1).toISOString());
-    if (delError) {
+    if (oldError) {
       setSaving(false);
       toast("Uložení výkazu se nezdařilo.", "error");
       return;
@@ -172,6 +174,20 @@ export default function PercentReportView({
       if (error) {
         setSaving(false);
         toast("Uložení výkazu se nezdařilo.", "error");
+        load();
+        return;
+      }
+    }
+    const oldIds = (old ?? []).map((r) => r.id as string);
+    if (oldIds.length > 0) {
+      const { error: delError } = await supabase
+        .from("time_entries")
+        .delete()
+        .in("id", oldIds);
+      if (delError) {
+        setSaving(false);
+        // nové bloky jsou uložené, staré zůstaly — další uložení je uklidí
+        toast("Výkaz se uložil jen napůl — ulož ho prosím znovu.", "error");
         load();
         return;
       }

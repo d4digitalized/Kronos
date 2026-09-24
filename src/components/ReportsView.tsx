@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllRows } from "@/lib/fetchAll";
 import { entrySeconds, fmtDate, fmtDuration, fmtTime } from "@/lib/format";
 import { toast } from "@/lib/toast";
 import ProjectPicker, { ProjectDot } from "@/components/ProjectPicker";
@@ -81,26 +82,39 @@ export default function ReportsView({
   const [projects, setProjects] = useState<Project[]>([]);
   const [hrTargets, setHrTargets] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  // rychlé přepínání období: starší odpověď nesmí přepsat novější
+  const loadSeq = useRef(0);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [tab, setTab] = useState<"person" | "project">("person");
   const [rate, setRate] = useState("");
   const [rateUnit, setRateUnit] = useState<"mesic" | "hod">("mesic");
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     const toExclusive = new Date(`${to}T00:00`);
     toExclusive.setDate(toExclusive.getDate() + 1);
-    const { data } = await supabase
-      .from("time_entries")
-      .select(
-        "id, started_at, stopped_at, user_id, project_id, description, profiles(full_name, email, avatar_initials, avatar_color), projects(name), tasks(title)"
-      )
-      .eq("workspace_id", wsId)
-      .not("stopped_at", "is", null)
-      .gte("started_at", new Date(`${from}T00:00`).toISOString())
-      .lt("started_at", toExclusive.toISOString());
-    setEntries((data as unknown as TimeEntry[]) ?? []);
+    // všechny stránky — jinak nad 1000 záznamů za období chybí náhodné záznamy
+    const { data, error } = await fetchAllRows<TimeEntry>((a, b) =>
+      supabase
+        .from("time_entries")
+        .select(
+          "id, started_at, stopped_at, user_id, project_id, description, profiles(full_name, email, avatar_initials, avatar_color), projects(name), tasks(title)"
+        )
+        .eq("workspace_id", wsId)
+        .not("stopped_at", "is", null)
+        .gte("started_at", new Date(`${from}T00:00`).toISOString())
+        .lt("started_at", toExclusive.toISOString())
+        .order("started_at")
+        .order("id")
+        .range(a, b)
+    );
+    if (seq !== loadSeq.current) return;
     setLoading(false);
+    // chyba ≠ „žádné hodiny": neukazovat nulové součty jako skutečnost
+    setLoadError(!!error);
+    if (!error) setEntries(data);
   }, [supabase, wsId, from, to]);
 
   useEffect(() => {
@@ -319,6 +333,13 @@ export default function ReportsView({
 
       {loading ? (
         <p className="p-4 text-ink-soft/70">Načítám…</p>
+      ) : loadError ? (
+        <p className="flex flex-wrap items-center gap-2 p-4 text-sm text-danger">
+          Záznamy se nepodařilo načíst.
+          <button onClick={load} className="rounded-md px-2 py-1 text-xs underline">
+            Zkusit znovu
+          </button>
+        </p>
       ) : (
         <div className="panel">
           <div className="flex items-center gap-2 border-b border-line/70 px-3 py-2">

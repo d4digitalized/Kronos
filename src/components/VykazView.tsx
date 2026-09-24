@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllRows } from "@/lib/fetchAll";
 import { entrySeconds, fmtDuration, fmtTime } from "@/lib/format";
 import { ProjectDot } from "@/components/ProjectPicker";
 import Avatar from "@/components/Avatar";
@@ -58,20 +59,26 @@ export default function VykazView({ wsId, userId, from, to, rate, unit }: Props)
   } | null>(null);
   const [wsName, setWsName] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   const load = useCallback(async () => {
     const toExclusive = new Date(`${to}T00:00`);
     toExclusive.setDate(toExclusive.getDate() + 1);
     const [entriesRes, profileRes, wsRes] = await Promise.all([
-      supabase
-        .from("time_entries")
-        .select("id, started_at, stopped_at, description, project_id, projects(name, position), tasks(title)")
-        .eq("workspace_id", wsId)
-        .eq("user_id", userId)
-        .not("stopped_at", "is", null)
-        .gte("started_at", new Date(`${from}T00:00`).toISOString())
-        .lt("started_at", toExclusive.toISOString())
-        .order("started_at", { ascending: true }),
+      // všechny stránky — výkaz za delší období má víc než 1000 záznamů
+      fetchAllRows<TimeEntry>((a, b) =>
+        supabase
+          .from("time_entries")
+          .select("id, started_at, stopped_at, description, project_id, projects(name, position), tasks(title)")
+          .eq("workspace_id", wsId)
+          .eq("user_id", userId)
+          .not("stopped_at", "is", null)
+          .gte("started_at", new Date(`${from}T00:00`).toISOString())
+          .lt("started_at", toExclusive.toISOString())
+          .order("started_at", { ascending: true })
+          .order("id")
+          .range(a, b)
+      ),
       supabase
         .from("profiles")
         .select("full_name, email, avatar_initials, avatar_color")
@@ -79,7 +86,9 @@ export default function VykazView({ wsId, userId, from, to, rate, unit }: Props)
         .single(),
       supabase.from("workspaces").select("name").eq("id", wsId).single(),
     ]);
-    setEntries((entriesRes.data as unknown as TimeEntry[]) ?? []);
+    // nepovedené načtení nesmí vytisknout výkaz s nulou hodin
+    setLoadError(!!entriesRes.error);
+    setEntries(entriesRes.data);
     setPerson(profileRes.data ?? null);
     setWsName(wsRes.data?.name ?? "");
     setLoading(false);
@@ -91,6 +100,16 @@ export default function VykazView({ wsId, userId, from, to, rate, unit }: Props)
 
   if (loading) {
     return <p className="p-8 text-ink-soft/70">Připravuji výkaz…</p>;
+  }
+  if (loadError) {
+    return (
+      <p className="flex flex-wrap items-center gap-2 p-8 text-sm text-danger">
+        Výkaz se nepodařilo načíst.
+        <button onClick={load} className="rounded-md px-2 py-1 text-xs underline">
+          Zkusit znovu
+        </button>
+      </p>
+    );
   }
 
   const totalSeconds = entries.reduce(
