@@ -34,7 +34,6 @@ import type {
 function activityText(a: TaskActivity): string {
   const m = a.meta ?? {};
   const to = m.to as string | number | null | undefined;
-  const from = m.from as string | number | null | undefined;
   switch (a.kind) {
     case "created":
       return "vytvořil/a kartu";
@@ -177,11 +176,26 @@ export default function CardModal({
   const [error, setError] = useState<string | null>(null);
   // autosave: pole se ukládají samy (text při opuštění, výběry hned)
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
-  // co je v DB — ať se text neukládá zbytečně a šlo se vrátit při chybě
+  // co je v DB (mění se až po úspěšném zápisu) — ať se text neukládá
+  // zbytečně a neuložený se při dalším pokusu (zavření karty) zkusí znovu
   const savedRef = useRef({ title: task.title, description: task.description });
-  // něco se uložilo → při zavření musí parent přenačíst seznam
+  // výběry (termín, priorita, opakování, skrytý): hodnota v DB a pořadí
+  // posledního zápisu — při chybě se pole vrátí na uloženou hodnotu
+  const savedChoices = useRef<Record<string, unknown>>({
+    due_date: task.due_date ?? "",
+    priority: task.priority ?? 4,
+    recurrence: task.recurrence ?? "",
+    is_private: !!task.is_private,
+  });
+  const choiceSeq = useRef<Record<string, number>>({});
+  // zápisy karty jdou za sebou: pořadí v DB = pořadí úprav a zavření karty
+  // počká, až doběhnou
+  const saveQueue = useRef<Promise<unknown>>(Promise.resolve());
+  // něco se ukládalo → při zavření musí parent přenačíst seznam
   const changedRef = useRef(false);
   const closeRef = useRef<() => void>(() => {});
+  const closingRef = useRef(false); // zavírání čeká na uložení — neopakovat
+  const addingSubtask = useRef(false); // druhý Enter nesmí založit podúkol znovu
   // debounce autosave popisu — ukládá se během psaní, ne až při opuštění pole
   const descTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -197,7 +211,9 @@ export default function CardModal({
   useEffect(() => {
     dialogRef.current?.focus();
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") closeRef.current();
+      // Esc spotřebovaný vnořeným prvkem (nabídka pickeru, našeptávač
+      // zmínek, potvrzovací dialog) kartu nezavírá
+      if (e.key === "Escape" && !e.defaultPrevented) closeRef.current();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -208,8 +224,7 @@ export default function CardModal({
     if (description === savedRef.current.description) return;
     if (descTimer.current) clearTimeout(descTimer.current);
     descTimer.current = setTimeout(() => {
-      savedRef.current.description = description;
-      autosave({ description });
+      saveText("description", description);
     }, 1000);
     return () => {
       if (descTimer.current) clearTimeout(descTimer.current);
@@ -369,38 +384,50 @@ export default function CardModal({
   async function setSingleAssignee(ref: string | null) {
     const memberId = ref && isMemberRef(ref) ? personRefId(ref) : null;
     const ghostId = ref && !isMemberRef(ref) ? personRefId(ref) : null;
+    // chyba uprostřed: část změny už mohla projít — kartu i seznamy srovnat
+    // podle DB, ať neukazují řešitele, který tam není
+    const fail = (message: string) => {
+      toast(message, "error");
+      loadAssignees();
+      notifyTasksChanged();
+    };
 
     // optimisticky přepni na jednoho (ostatní zmizí)
     setAssignees(memberId ? new Set([memberId]) : new Set());
     setGhostAssignees(ghostId ? new Set([ghostId]) : new Set());
 
+    // řešitel musí být člen projektu, jinak by úkol kvůli RLS neviděl.
+    // Admin proto nečlena při přiřazení rovnou doplní na projekt — ještě
+    // před smazáním starého přiřazení, ať chyba tady nenechá úkol bez řešitele.
+    if (memberId && task.project_id && isAdmin && !projectMembers.has(memberId)) {
+      const { error: pmError } = await supabase
+        .from("project_members")
+        .upsert(
+          { project_id: task.project_id, user_id: memberId },
+          { onConflict: "project_id,user_id", ignoreDuplicates: true }
+        );
+      if (pmError) {
+        fail("Nepodařilo se přidat uživatele na projekt.");
+        return;
+      }
+      setProjectMembers((prev) => new Set(prev).add(memberId));
+    }
+
     // smaž veškeré stávající přiřazení (členy i duchy)
-    await supabase.from("task_assignees").delete().eq("task_id", task.id);
-    await supabase.from("task_contact_assignees").delete().eq("task_id", task.id);
+    for (const table of ["task_assignees", "task_contact_assignees"]) {
+      const { error } = await supabase.from(table).delete().eq("task_id", task.id);
+      if (error) {
+        fail("Změna řešitele se nezdařila.");
+        return;
+      }
+    }
 
     if (memberId) {
-      // řešitel musí být člen projektu, jinak by úkol kvůli RLS neviděl.
-      // Admin proto nečlena při přiřazení rovnou doplní na projekt.
-      if (task.project_id && isAdmin && !projectMembers.has(memberId)) {
-        const { error: pmError } = await supabase
-          .from("project_members")
-          .upsert(
-            { project_id: task.project_id, user_id: memberId },
-            { onConflict: "project_id,user_id", ignoreDuplicates: true }
-          );
-        if (pmError) {
-          toast("Nepodařilo se přidat uživatele na projekt.", "error");
-          loadAssignees();
-          return;
-        }
-        setProjectMembers((prev) => new Set(prev).add(memberId));
-      }
       const { error } = await supabase
         .from("task_assignees")
         .insert({ task_id: task.id, user_id: memberId });
       if (error) {
-        toast("Změna řešitele se nezdařila.", "error");
-        loadAssignees();
+        fail("Změna řešitele se nezdařila.");
         return;
       }
       pingNotifyEmails();
@@ -409,8 +436,7 @@ export default function CardModal({
         .from("task_contact_assignees")
         .insert({ task_id: task.id, contact_id: ghostId });
       if (error) {
-        toast("Změna řešitele se nezdařila.", "error");
-        loadAssignees();
+        fail("Změna řešitele se nezdařila.");
         return;
       }
     }
@@ -528,36 +554,82 @@ export default function CardModal({
     await saveProject(data.id as string);
   }
 
-  /** Uloží dílčí změnu rovnou do DB (autosave) — modal zůstává otevřený. */
-  async function autosave(patch: Record<string, unknown>) {
+  /** Jeden zápis do karty. Změna se počítá hned (i rozběhnutá či neúspěšná)
+      — seznam pod kartou se pak při zavření přenačte. */
+  async function writeTask(patch: Record<string, unknown>) {
+    changedRef.current = true;
     setSaveState("saving");
-    const { error } = await supabase.from("tasks").update(patch).eq("id", task.id);
+    // zaseklé spojení (probuzení z uspání) nesmí zavření karty držet donekonečna
+    const abort = new AbortController();
+    const timeout = setTimeout(() => abort.abort(), 15_000);
+    const { error } = await supabase
+      .from("tasks")
+      .update(patch)
+      .eq("id", task.id)
+      .abortSignal(abort.signal);
+    clearTimeout(timeout);
     if (error) {
       setSaveState("idle");
       setError("Uložení se nezdařilo.");
+      toast("Změnu se nepodařilo uložit.", "error");
       return false;
     }
-    changedRef.current = true;
     setError(null);
     setSaveState("saved");
     loadActivity();
     return true;
   }
 
+  /** Zařadí zápis za předchozí (spustí se i po jejich chybě). */
+  function enqueue(job: () => Promise<boolean>) {
+    const run = saveQueue.current.then(job, job);
+    saveQueue.current = run;
+    return run;
+  }
+
+  /** Uloží dílčí změnu rovnou do DB (autosave) — modal zůstává otevřený. */
+  function autosave(patch: Record<string, unknown>) {
+    return enqueue(() => writeTask(patch));
+  }
+
+  /** Název/popis zapíše, jen když se liší od DB — porovná se až na řadě
+      ve frontě, po doběhnutí předchozích zápisů. */
+  function saveText(field: "title" | "description", value: string) {
+    return enqueue(async () => {
+      if (value === savedRef.current[field]) return true;
+      const ok = await writeTask({ [field]: value });
+      if (ok) savedRef.current[field] = value;
+      return ok;
+    });
+  }
+
   /** Text se ukládá při opuštění pole a jen když se opravdu změnil. */
   function saveTitle() {
     const next = title.trim() || task.title;
     if (next !== title) setTitle(next);
-    if (next === savedRef.current.title) return;
-    savedRef.current.title = next;
-    autosave({ title: next });
+    return saveText("title", next);
   }
 
   function saveDescription() {
     if (descTimer.current) clearTimeout(descTimer.current);
-    if (description === savedRef.current.description) return;
-    savedRef.current.description = description;
-    autosave({ description });
+    return saveText("description", description);
+  }
+
+  /** Výběr (termín, priorita, opakování, skrytý) se ukládá hned. Když zápis
+      selže, pole se vrátí na hodnotu v DB — jen u poslední volby; o novější
+      (čeká ve frontě) rozhodne její vlastní zápis. */
+  async function saveChoice<T>(
+    column: string,
+    next: T,
+    set: React.Dispatch<React.SetStateAction<T>>,
+    dbValue: unknown = next
+  ) {
+    set(next);
+    const seq = (choiceSeq.current[column] ?? 0) + 1;
+    choiceSeq.current[column] = seq;
+    if (await autosave({ [column]: dbValue })) savedChoices.current[column] = next;
+    else if (seq === choiceSeq.current[column])
+      set(savedChoices.current[column] as T);
   }
 
   /** Přesun karty do jiného projektu — s ním putují i podúkoly. */
@@ -598,7 +670,8 @@ export default function CardModal({
     const end = new Date(`${date}T${to}`).toISOString();
     const ok = await autosave({ planned_start: start, planned_end: end });
     if (!ok) return;
-    const res = await syncTaskCalendar(task.id);
+    const res = await syncCalendar();
+    if (!res) return;
     if (res.error) toast(res.error, "error");
     else if ((res.synced ?? 0) === 0 && (res.skipped ?? 0) > 0)
       toast("Plán uložen; kalendář se nezaložil — účet mimo Workspace.", "error");
@@ -611,14 +684,59 @@ export default function CardModal({
     setPlanTo("");
     const ok = await autosave({ planned_start: null, planned_end: null });
     if (!ok) return;
-    const res = await syncTaskCalendar(task.id);
-    if (res.error) toast(res.error, "error");
+    const res = await syncCalendar();
+    if (res?.error) toast(res.error, "error");
   }
 
-  /** Zavření karty: když se něco uložilo, ať se seznam pod ní přenačte. */
-  function close() {
-    if (changedRef.current) onChanged();
-    else onClose();
+  /** Server action po nasazení nové verze v otevřené záložce selže (staré
+      id akce) — musí skončit hláškou, ne nezachyceným rejectem. */
+  async function syncCalendar() {
+    try {
+      return await syncTaskCalendar(task.id);
+    } catch {
+      toast("Kalendář se nepodařilo aktualizovat.", "error");
+      return null;
+    }
+  }
+
+  /** Dopíše rozepsaný název a popis (onBlur ani debounce se při zavření
+      nestihnou) a počká i na dřív rozběhnuté zápisy — jsou ve frontě před
+      ním. false = něco se nepodařilo uložit. */
+  async function flushPending() {
+    const [titleOk, descOk] = await Promise.all([saveTitle(), saveDescription()]);
+    return titleOk && descOk;
+  }
+
+  /** Zavření karty (Esc, ✕, Hotovo, klik vedle, timer): nejdřív uložit
+      rozepsané; když se něco měnilo, ať se seznam pod kartou přenačte. */
+  async function close() {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    try {
+      // uložení selhalo (toast už byl) → zavřít jen na výslovné přání,
+      // jinak karta zůstane otevřená a text se dá zkusit uložit znovu
+      if (!(await flushPending())) {
+        const discard = await confirmDialog({
+          title: "Zavřít bez uložení?",
+          message:
+            "Název nebo popis se nepodařilo uložit. Zavřením karty se změna ztratí.",
+          confirmLabel: "Zavřít",
+        });
+        if (!discard) return;
+      }
+      if (newComment.trim()) {
+        const discard = await confirmDialog({
+          title: "Zahodit rozepsaný komentář?",
+          message: "Komentář ještě není odeslaný. Zavřením karty se ztratí.",
+          confirmLabel: "Zahodit",
+        });
+        if (!discard) return;
+      }
+      if (changedRef.current) onChanged();
+      else onClose();
+    } finally {
+      closingRef.current = false;
+    }
   }
   // Esc má vždy po ruce aktuální close (listener se registruje jen jednou)
   closeRef.current = close;
@@ -626,12 +744,22 @@ export default function CardModal({
   async function remove() {
     const ok = await confirmDialog({
       title: "Smazat kartu?",
-      message: `Karta „${task.title}" se smaže včetně všech záznamů času a komentářů. Tuto akci nelze vrátit.`,
+      message: `Karta „${task.title}" se smaže i s komentáři. Odpracovaný čas zůstane v přehledech — s názvem karty v popisu. Tuto akci nelze vrátit.`,
     });
     if (!ok) return;
-    const { error } = await supabase.from("tasks").delete().eq("id", task.id);
-    if (error) {
-      setError("Smazat kartu může jen její autor nebo admin.");
+    // RLS cizí kartu neodmítne chybou, jen nic nesmaže (0 řádků)
+    const { data, error } = await supabase
+      .from("tasks")
+      .delete()
+      .eq("id", task.id)
+      .select("id");
+    if (error || !data?.length) {
+      toast(
+        error
+          ? "Kartu se nepodařilo smazat."
+          : "Smazat kartu může jen její autor nebo admin.",
+        "error"
+      );
       return;
     }
     onChanged();
@@ -686,18 +814,21 @@ export default function CardModal({
   async function addSubtask(e: React.FormEvent) {
     e.preventDefault();
     const name = newSubtask.trim();
-    if (!name) return;
+    if (!name || addingSubtask.current) return;
+    addingSubtask.current = true;
+    setNewSubtask(""); // hned prázdné — při chybě se text vrátí
     const { error } = await supabase.from("tasks").insert({
       workspace_id: task.workspace_id,
       project_id: task.project_id,
       parent_id: task.id,
       title: name,
     });
+    addingSubtask.current = false;
     if (error) {
       toast("Podúkol se nepodařilo přidat.", "error");
+      setNewSubtask((cur) => cur || name);
       return;
     }
-    setNewSubtask("");
     loadSubtasks();
   }
 
@@ -710,7 +841,19 @@ export default function CardModal({
   }
 
   async function removeSubtask(sub: Task) {
-    await supabase.from("tasks").delete().eq("id", sub.id);
+    // RLS cizí podúkol neodmítne chybou, jen nic nesmaže (0 řádků)
+    const { data, error } = await supabase
+      .from("tasks")
+      .delete()
+      .eq("id", sub.id)
+      .select("id");
+    if (error || !data?.length)
+      toast(
+        error
+          ? "Podúkol se nepodařilo smazat."
+          : "Smazat podúkol může jen jeho autor nebo admin.",
+        "error"
+      );
     loadSubtasks();
   }
 
@@ -763,6 +906,7 @@ export default function CardModal({
       e.preventDefault();
       pickMention(mentionSuggestions[mentionActive].profiles!.tag_name!);
     } else if (e.key === "Escape") {
+      e.preventDefault(); // zavře jen našeptávač, ne kartu s rozepsaným komentářem
       setMentionQuery(null);
     }
   }
@@ -803,7 +947,7 @@ export default function CardModal({
       task_id: task.id,
       task_title: task.title,
     });
-    onClose();
+    await close(); // i tady uložit rozepsané a přenačíst seznam po změnách
   }
 
   const doneSubtasks = subtasks.filter((s) => s.completed_at).length;
@@ -1135,7 +1279,7 @@ export default function CardModal({
                 od
                 <input
                   type="date"
-                  value={followup.waiting_since ?? followup.created_at.slice(0, 10)}
+                  value={followup.waiting_since ?? localDate(followup.created_at)}
                   disabled={!canClearWaiting}
                   onChange={(e) =>
                     e.target.value && patchFollowup({ waiting_since: e.target.value })
@@ -1208,20 +1352,18 @@ export default function CardModal({
           <input
             type="date"
             value={dueDate}
-            onChange={(e) => {
-              setDueDate(e.target.value);
-              autosave({ due_date: e.target.value || null });
-            }}
+            onChange={(e) =>
+              saveChoice("due_date", e.target.value, setDueDate, e.target.value || null)
+            }
             aria-label="Termín"
             className="input h-10 w-full min-w-0 max-w-full px-2 py-1 sm:h-auto sm:w-auto"
           />
           <span className="text-sm text-ink-soft/70 sm:hidden">Priorita:</span>
           <select
             value={priority}
-            onChange={(e) => {
-              setPriority(Number(e.target.value));
-              autosave({ priority: Number(e.target.value) });
-            }}
+            onChange={(e) =>
+              saveChoice("priority", Number(e.target.value), setPriority)
+            }
             aria-label="Priorita"
             style={{ color: priorityColor(priority) ?? undefined }}
             className="input h-10 w-full px-2 sm:h-auto sm:w-auto"
@@ -1235,12 +1377,14 @@ export default function CardModal({
           <span className="text-sm text-ink-soft/70 sm:hidden">Opakování:</span>
           <select
             value={recurrence}
-            onChange={(e) => {
-              setRecurrence(e.target.value);
-              autosave({
-                recurrence: (e.target.value || null) as Recurrence | null,
-              });
-            }}
+            onChange={(e) =>
+              saveChoice(
+                "recurrence",
+                e.target.value,
+                setRecurrence,
+                (e.target.value || null) as Recurrence | null
+              )
+            }
             aria-label="Opakování"
             className="input h-10 w-full px-2 sm:h-auto sm:w-auto"
           >
@@ -1264,10 +1408,9 @@ export default function CardModal({
               <input
                 type="checkbox"
                 checked={isPrivate}
-                onChange={(e) => {
-                  setIsPrivate(e.target.checked);
-                  autosave({ is_private: e.target.checked });
-                }}
+                onChange={(e) =>
+                  saveChoice("is_private", e.target.checked, setIsPrivate)
+                }
                 className="h-4 w-4"
               />
               🔒 Skrytý

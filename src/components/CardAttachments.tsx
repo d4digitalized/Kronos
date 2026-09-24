@@ -97,15 +97,27 @@ export default function CardAttachments({
       message: `Soubor „${a.file_name}" se nenávratně smaže.`,
     });
     if (!ok) return;
-    await supabase.storage.from(BUCKET).remove([a.object_path]);
-    const { error } = await supabase
+    // nejdřív řádek (RLS cizí přílohu neodmítne chybou, jen nic nesmaže),
+    // až pak soubor — jinak by po odmítnutí zůstal řádek bez souboru
+    const { data, error } = await supabase
       .from("task_attachments")
       .delete()
-      .eq("id", a.id);
-    if (error) {
-      toast("Smazat přílohu může jen autor nebo admin.", "error");
+      .eq("id", a.id)
+      .select("id");
+    if (error || !data?.length) {
+      toast(
+        error
+          ? "Přílohu se nepodařilo smazat."
+          : "Smazat přílohu může jen autor nebo admin.",
+        "error"
+      );
       return;
     }
+    const { error: storageError } = await supabase.storage
+      .from(BUCKET)
+      .remove([a.object_path]);
+    if (storageError)
+      toast("Příloha je odebraná, ale soubor se nepodařilo smazat z úložiště.", "error");
     load();
   }
 

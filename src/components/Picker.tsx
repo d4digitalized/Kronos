@@ -76,7 +76,12 @@ export default function Picker({
       if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key !== "Escape") return;
+      // Esc zavře jen nabídku — karta/dialog pod ní ho ignoruje
+      // (defaultPrevented) a na window se už nedostane
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
     };
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKey);
@@ -250,7 +255,7 @@ export default function Picker({
                     active >= visible.length ? "bg-accent-soft" : ""
                   }`}
                 >
-                  ➕ {createLabel} „{trimmed}"
+                  ➕ {createLabel} „{trimmed}“
                 </button>
               </li>
             )}

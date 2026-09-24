@@ -68,13 +68,18 @@ export default function NewTaskDialog({
   useEffect(() => {
     titleRef.current?.focus();
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
+      // Esc spotřebovaný otevřenou nabídkou pickeru dialog (a rozepsaný
+      // úkol) nezavírá
+      if (e.key === "Escape" && !e.defaultPrevented) onClose();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
   useEffect(() => {
+    // odpověď pro dřív vybranou firmu dorazivší až po přepnutí zahodit —
+    // jinak by v dialogu zůstaly její projekty a lidé
+    let stale = false;
     Promise.all([
       supabase
         .from("projects")
@@ -100,6 +105,7 @@ export default function NewTaskDialog({
         .eq("workspace_id", activeWs)
         .order("name"),
     ]).then(([projRes, memRes, grantRes, contactRes]) => {
+      if (stale) return;
       const list = (projRes.data as Project[]) ?? [];
       setProjects(list);
       if (list.length === 1) setProjectId(list[0].id); // jediný projekt předvyber
@@ -107,6 +113,9 @@ export default function NewTaskDialog({
       setGrants(new Set((grantRes.data ?? []).map((r) => r.target_id as string)));
       setContacts((contactRes.data as Contact[]) ?? []);
     });
+    return () => {
+      stale = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWs, userId]);
 
@@ -135,13 +144,18 @@ export default function NewTaskDialog({
       setProjectMembers(new Set());
       return;
     }
+    let stale = false; // při rychlém přepínání platí jen poslední projekt
     supabase
       .from("project_members")
       .select("user_id")
       .eq("project_id", projectId)
-      .then(({ data }) =>
-        setProjectMembers(new Set((data ?? []).map((r) => r.user_id as string)))
-      );
+      .then(({ data }) => {
+        if (stale) return;
+        setProjectMembers(new Set((data ?? []).map((r) => r.user_id as string)));
+      });
+    return () => {
+      stale = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 

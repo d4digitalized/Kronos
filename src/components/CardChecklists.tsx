@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { toast } from "@/lib/toast";
 import { confirmDialog } from "@/lib/confirm";
@@ -21,6 +21,9 @@ export default function CardChecklists({
   const [newItem, setNewItem] = useState<Record<string, string>>({});
   const [newList, setNewList] = useState("");
   const [adding, setAdding] = useState(false);
+  // rozběhnuté přidání — druhý Enter by založil stejný záznam znovu
+  const addingList = useRef(false);
+  const addingItem = useRef(false);
 
   const load = useCallback(async () => {
     const { data: listData, error } = await supabase
@@ -59,19 +62,26 @@ export default function CardChecklists({
 
   async function addList(e: React.FormEvent) {
     e.preventDefault();
+    if (addingList.current) return;
+    addingList.current = true;
+    const typed = newList;
     const title = newList.trim() || "Seznam";
+    // formulář hned zavřít — při chybě se vrátí i s textem
+    setNewList("");
+    setAdding(false);
     const { error } = await supabase.from("checklists").insert({
       workspace_id: workspaceId,
       task_id: taskId,
       title,
       position: lists.length,
     });
+    addingList.current = false;
     if (error) {
       toast("Seznam se nepodařilo přidat.", "error");
+      setNewList((cur) => cur || typed);
+      setAdding(true);
       return;
     }
-    setNewList("");
-    setAdding(false);
     load();
   }
 
@@ -95,17 +105,20 @@ export default function CardChecklists({
   async function addItem(listId: string, e: React.FormEvent) {
     e.preventDefault();
     const content = (newItem[listId] ?? "").trim();
-    if (!content) return;
+    if (!content || addingItem.current) return;
+    addingItem.current = true;
+    setNewItem((p) => ({ ...p, [listId]: "" })); // hned prázdné — při chybě zpět
     const { error } = await supabase.from("checklist_items").insert({
       checklist_id: listId,
       content,
       position: (items[listId] ?? []).length,
     });
+    addingItem.current = false;
     if (error) {
       toast("Položku se nepodařilo přidat.", "error");
+      setNewItem((p) => ({ ...p, [listId]: p[listId] || content }));
       return;
     }
-    setNewItem((p) => ({ ...p, [listId]: "" }));
     load();
   }
 

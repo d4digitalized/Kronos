@@ -16,9 +16,21 @@ export default function ConfirmDialog() {
     return () => window.removeEventListener(CONFIRM_EVENT, onConfirm);
   }, []);
 
-  // Fokus na potvrzovací tlačítko po otevření.
+  // Fokus na potvrzovací tlačítko po otevření. Esc chytáme hned na window
+  // (capture): patří jen dialogu — karta ani dialog pod ním se nesmí zavřít,
+  // a to ani když fokus z dialogu utekl (klik do textu).
   useEffect(() => {
-    if (pending) confirmRef.current?.focus();
+    if (!pending) return;
+    confirmRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      pending.resolve(false);
+      setPending(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [pending]);
 
   if (!pending) return null;
@@ -34,9 +46,6 @@ export default function ConfirmDialog() {
     <div
       className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4"
       onClick={() => close(false)}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") close(false);
-      }}
     >
       <div
         role="alertdialog"
