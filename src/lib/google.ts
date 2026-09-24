@@ -10,6 +10,9 @@ const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SCOPE = "https://www.googleapis.com/auth/calendar";
 const API = "https://www.googleapis.com/calendar/v3";
 const TZ = "Europe/Prague";
+// Google bez odpovědi nesmí držet server action (karta, Můj den) do limitu
+// platformy — po 10 s radši chyba, kterou UI ohlásí
+const TIMEOUT_MS = 10_000;
 
 export function googleConfigured(): boolean {
   return !!(process.env.GOOGLE_SA_EMAIL && process.env.GOOGLE_SA_PRIVATE_KEY);
@@ -36,8 +39,14 @@ function privateKey(): string {
   return k.replace(/\\n/g, "\n").trim();
 }
 
+// Token platí hodinu: v teplé instanci ho znovu nevyměňovat — dřív každé
+// volání Calendar API (3 na řešitele) stálo navíc výměnu tokenu.
+const tokenCache = new Map<string, { token: string; exp: number }>();
+
 /** Access token pro jednání jménem uživatele (JWT bearer flow). */
 async function accessToken(userEmail: string): Promise<string> {
+  const cached = tokenCache.get(userEmail);
+  if (cached && cached.exp - Date.now() > 60_000) return cached.token;
   const iss = process.env.GOOGLE_SA_EMAIL!.trim();
   const key = privateKey();
   const now = Math.floor(Date.now() / 1000);
@@ -63,11 +72,17 @@ async function accessToken(userEmail: string): Promise<string> {
       grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
       assertion,
     }),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`google token ${res.status}: ${await res.text()}`);
   }
-  return (await res.json()).access_token as string;
+  const json = (await res.json()) as { access_token: string; expires_in?: number };
+  tokenCache.set(userEmail, {
+    token: json.access_token,
+    exp: Date.now() + (json.expires_in ?? 3600) * 1000,
+  });
+  return json.access_token;
 }
 
 async function gfetch(
@@ -77,6 +92,7 @@ async function gfetch(
 ): Promise<Response> {
   const token = await accessToken(userEmail);
   return fetch(`${API}${path}`, {
+    signal: AbortSignal.timeout(TIMEOUT_MS),
     ...init,
     headers: {
       Authorization: `Bearer ${token}`,

@@ -2,6 +2,7 @@
 // jeden e-mail na řešitele. Volá Vercel Cron (Bearer CRON_SECRET).
 
 import { NextResponse } from "next/server";
+import { isCronAuthorized } from "@/lib/cronAuth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { APP_URL, emailLayout, escapeHtml, sendEmail } from "@/lib/email";
 
@@ -28,7 +29,7 @@ function taskList(tasks: DigestTask[]): string {
 }
 
 export async function GET(req: Request) {
-  if (req.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isCronAuthorized(req)) {
     return new Response("Unauthorized", { status: 401 });
   }
 

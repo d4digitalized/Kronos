@@ -26,6 +26,8 @@ export async function sendEmail(
       html,
       ...(replyTo ? { reply_to: replyTo } : {}),
     }),
+    // Resend bez odpovědi nesmí zablokovat frontu notifikací
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {
     throw new Error(`Resend ${res.status}: ${await res.text()}`);
@@ -75,6 +77,8 @@ export function replyAddress(taskId: string, userId: string): string | null {
 export function parseReplyAddress(
   address: string
 ): { taskId: string; userId: string } | null {
+  // bez tajemství by prošel token podepsaný prázdným klíčem (padělek)
+  if (!process.env.CRON_SECRET) return null;
   const m = address.trim().match(/^r([A-Za-z0-9_-]{54})@/);
   if (!m) return null;
   const buf = Buffer.from(m[1], "base64url");

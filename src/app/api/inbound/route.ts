@@ -4,7 +4,7 @@
 // Env: RESEND_WEBHOOK_SECRET (svix signing secret), RESEND_API_KEY.
 
 import { createHmac, timingSafeEqual } from "crypto";
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { parseReplyAddress } from "@/lib/email";
 import { drainNotifications } from "@/lib/notify-drain";
@@ -107,6 +107,20 @@ export async function POST(req: Request) {
     .maybeSingle();
   if (!member) return NextResponse.json({ ignored: "not-a-member" });
 
+  // Webhook se doručuje „aspoň jednou" — při pomalé nebo chybné odpovědi ho
+  // Resend (svix) pošle znovu. Stejný text od stejného autora na téže kartě
+  // za posledních 24 h proto podruhé nezakládáme.
+  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const { data: dup } = await supabase
+    .from("task_comments")
+    .select("id")
+    .eq("task_id", task.id)
+    .eq("author_id", token.userId)
+    .eq("body", body)
+    .gte("created_at", since)
+    .limit(1);
+  if (dup?.length) return NextResponse.json({ ignored: "duplicate" });
+
   const { error } = await supabase.from("task_comments").insert({
     workspace_id: task.workspace_id,
     task_id: task.id,
@@ -117,7 +131,14 @@ export async function POST(req: Request) {
     console.error("inbound: insert comment failed", error);
     return new Response("Insert failed", { status: 500 });
   }
-  // komentář založil notifikace → rovnou odeslat e-maily ostatním
-  const drained = await drainNotifications();
-  return NextResponse.json({ ok: true, ...drained });
+  // komentář založil notifikace → e-maily ostatním až po odpovědi webhooku
+  // (odesílání trvá; pomalá odpověď = opakované doručení)
+  after(async () => {
+    try {
+      await drainNotifications();
+    } catch (err) {
+      console.error("inbound: drain failed", err);
+    }
+  });
+  return NextResponse.json({ ok: true });
 }

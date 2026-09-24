@@ -3,9 +3,10 @@
 
 import { NextResponse } from "next/server";
 import { drainNotifications } from "@/lib/notify-drain";
+import { isCronAuthorized } from "@/lib/cronAuth";
 
 export async function GET(req: Request) {
-  if (req.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isCronAuthorized(req)) {
     return new Response("Unauthorized", { status: 401 });
   }
   return NextResponse.json(await drainNotifications());

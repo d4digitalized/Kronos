@@ -12,6 +12,19 @@ function first(v: string | string[] | undefined): string {
   return Array.isArray(v) ? (v[0] ?? "") : (v ?? "");
 }
 
+// Jméno klienta si volí sám (kdokoli může zaregistrovat „Claude") — souhlas
+// proto ukazuje, KAM se po povolení přístup předá, a varuje u cizí adresy.
+const TRUSTED_HOST = /(^|.)claude.(ai|com)$|^localhost$|^127.0.0.1$|^[::1]$/;
+
+function redirectTarget(uri: string): { host: string; trusted: boolean } {
+  try {
+    const url = new URL(uri);
+    return { host: url.host, trusted: TRUSTED_HOST.test(url.hostname) };
+  } catch {
+    return { host: uri, trusted: false };
+  }
+}
+
 function Card({ children }: { children: React.ReactNode }) {
   return (
     <main className="flex min-h-screen items-center justify-center bg-paper p-4">
@@ -66,6 +79,8 @@ export default async function AuthorizePage({
     redirect("/login?next=" + encodeURIComponent(self));
   }
 
+  const target = redirectTarget(p.redirect_uri);
+
   return (
     <Card>
       <h1 className="font-display text-lg font-semibold">Povolit přístup</h1>
@@ -75,6 +90,11 @@ export default async function AuthorizePage({
         <span className="font-medium">{user.email}</span>). Bude
         moci pod tvým jménem číst a zakládat úkoly, přiřazovat řešitele a komentovat —
         jen v projektech, které sám vidíš.
+      </p>
+      <p className={`text-sm ${target.trusted ? "text-ink-soft" : "text-danger"}`}>
+        Přístup dostane: <span className="font-mono font-medium">{target.host}</span>
+        {!target.trusted &&
+          " — neznámá adresa. Povol jen, pokud napojení právě sám zakládáš."}
       </p>
       <form method="post" action="/api/oauth/authorize" className="space-y-3">
         {Object.entries(p).map(([k, v]) => (

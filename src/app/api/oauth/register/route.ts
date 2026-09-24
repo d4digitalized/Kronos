@@ -33,7 +33,12 @@ export async function POST(req: Request) {
   for (const u of redirectUris) {
     try {
       const url = new URL(u);
-      if (!["http:", "https:"].includes(url.protocol) || url.hash) throw new Error();
+      // http jen pro lokální klienty (Claude Code / desktop na loopbacku) —
+      // jinak by kód mohl odejít nešifrovaně na cizí server
+      const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+      if (url.hash) throw new Error();
+      if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
+        throw new Error();
     } catch {
       return jsonCors(
         { error: "invalid_redirect_uri", error_description: `Neplatné redirect_uri: ${u}` },
