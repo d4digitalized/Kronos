@@ -3,18 +3,15 @@
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { safeNextPath } from "@/lib/safeNext";
 
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const linkError = searchParams.get("error") === "link";
   const oauthError = searchParams.get("error") === "oauth";
-  // návrat po přihlášení — jen relativní cesta (ne protocol-relative), ať to nejde zneužít k open redirectu
-  const nextParam = searchParams.get("next");
-  const dest =
-    nextParam && nextParam.startsWith("/") && !nextParam.startsWith("//")
-      ? nextParam
-      : "/";
+  // návrat po přihlášení — jen vlastní cesta, ať to nejde zneužít k open redirectu
+  const dest = safeNextPath(searchParams.get("next"));
 
   const [mode, setMode] = useState<"login" | "reset" | "reset-sent">("login");
   const [email, setEmail] = useState("");

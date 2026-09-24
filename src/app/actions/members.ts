@@ -171,6 +171,17 @@ export async function setMemberNotifyEmail(
   return { ok: true };
 }
 
+// jediné sloupce, které smí setMemberFlag měnit (viz níž)
+const MEMBER_FLAGS = new Set<string>([
+  "can_delegate",
+  "can_hide",
+  "notify_enabled",
+  "can_hr",
+  "can_notes",
+  "time_only",
+  "percent_report",
+]);
+
 /** Přepne členovi per-firma flag: delegaci úkolů („Čekám na", Delegované),
     skryté úkoly (adminům je aplikace dává vždy bez ohledu na flag),
     e-mailové notifikace (notify_enabled), nebo HR (výkazy přidělených lidí).
@@ -188,6 +199,12 @@ export async function setMemberFlag(
     | "percent_report",
   value: boolean
 ): Promise<{ ok?: true; error?: string }> {
+  // server action je veřejný endpoint a typy TS za běhu neplatí: bez téhle
+  // kontroly by admin firmy service-role klíčem přepsal i role nebo
+  // workspace_id (= přesun svého členství do cizí firmy)
+  if (!MEMBER_FLAGS.has(flag) || typeof value !== "boolean")
+    return { error: "Neplatný požadavek." };
+
   const supabase = await createClient();
   const {
     data: { user },
