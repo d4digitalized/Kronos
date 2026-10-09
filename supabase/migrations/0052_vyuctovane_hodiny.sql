@@ -38,7 +38,8 @@ create policy teb_select on public.time_entry_billings for select
   to authenticated
   using (
     (select public.is_super_admin())
-    or workspace_id = any ((select public.my_admin_ws_ids()))
+    -- přetypování: bez něj Postgres bere (select …) jako poddotaz a porovná uuid s uuid[]
+    or workspace_id = any ((select public.my_admin_ws_ids())::uuid[])
   );
 
 commit;
