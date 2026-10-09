@@ -1297,7 +1297,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Výkazy času",
       description:
-        "Záznamy času za období (dny včetně, Europe/Prague) + součty po lidech a projektech. Vidíš své záznamy; admin workspace vidí všechny, HR ty, na které má grant. Volitelně omez na workspace, uživatele nebo projekt. summary_only vrátí jen součty (pro dlouhá období).",
+        "Záznamy času za období (dny včetně, Europe/Prague) + součty po lidech a projektech. Vidíš své záznamy; admin workspace vidí všechny, HR ty, na které má grant. Volitelně omez na workspace, uživatele nebo projekt. summary_only vrátí jen součty (pro dlouhá období). Adminovi vrací u záznamu billing = { number, status }, pokud už je hodina ve vyúčtování v TEKTOSu — takové záznamy do dalšího vyúčtování nedávej; do TEKTOS create_billing posílej id záznamu jako kronos_entry_id.",
       inputSchema: {
         from: z.string().describe("od, YYYY-MM-DD (včetně)"),
         to: z.string().describe("do, YYYY-MM-DD (včetně)"),
@@ -1314,7 +1314,7 @@ export function registerTools(server: McpServer): void {
       let q = client
         .from("time_entries")
         .select(
-          "id, user_id, workspace_id, project_id, task_id, description, started_at, stopped_at, profiles(full_name, email), projects(name), tasks(title)"
+          "id, user_id, workspace_id, project_id, task_id, description, started_at, stopped_at, profiles(full_name, email), projects(name), tasks(title), time_entry_billings(billing_number, billing_status)"
         )
         .gte("started_at", pragueDate(from, "00:00").toISOString())
         .lt("started_at", pragueDate(nextDay(to), "00:00").toISOString())
@@ -1337,8 +1337,17 @@ export function registerTools(server: McpServer): void {
         profiles: { full_name: string; email: string } | null;
         projects: { name: string } | null;
         tasks: { title: string } | null;
+        // 0052: štítek z TEKTOSu, RLS ho vrací jen adminům firmy
+        time_entry_billings:
+          | { billing_number: string; billing_status: string }
+          | { billing_number: string; billing_status: string }[]
+          | null;
       };
       const rows = (data ?? []) as unknown as Row[];
+      const billingOf = (e: Row) => {
+        const b = Array.isArray(e.time_entry_billings) ? e.time_entry_billings[0] : e.time_entry_billings;
+        return b ? { number: b.billing_number, status: b.billing_status === "paid" ? "uhrazeno" : "vystaveno" } : null;
+      };
       const byUser = new Map<string, { user_id: string; name: string; minutes: number }>();
       const byProject = new Map<string, { project_id: string | null; name: string; minutes: number }>();
       const byUserProject = new Map<string, { user: string; project: string; minutes: number }>();
@@ -1385,6 +1394,7 @@ export function registerTools(server: McpServer): void {
               stopped_at: pragueStamp(e.stopped_at),
               running: !e.stopped_at,
               minutes: minutes(e.started_at, e.stopped_at),
+              billing: billingOf(e),
             })),
       });
     }

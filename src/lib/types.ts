@@ -240,6 +240,13 @@ export type TaskActivity = {
   profiles?: { full_name: string; email: string } | null;
 };
 
+/** Štítek vyúčtovaných hodin z TEKTOSu (0052) — RLS ho vrací jen adminům firmy. */
+export type TimeEntryBilling = {
+  billing_number: string;
+  billing_status: "issued" | "paid";
+  billing_url: string | null;
+};
+
 export type TimeEntry = {
   id: string;
   workspace_id: string;
@@ -257,4 +264,6 @@ export type TimeEntry = {
     avatar_initials?: string;
     avatar_color?: string;
   };
+  /** jen pro adminy (RLS), ostatním null; PostgREST může vrátit i pole */
+  time_entry_billings?: TimeEntryBilling | TimeEntryBilling[] | null;
 };

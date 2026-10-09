@@ -7,6 +7,7 @@ import { entrySeconds, fmtDate, fmtDuration, fmtTime } from "@/lib/format";
 import { toast } from "@/lib/toast";
 import ProjectPicker, { ProjectDot } from "@/components/ProjectPicker";
 import Avatar from "@/components/Avatar";
+import BilledBadge from "@/components/BilledBadge";
 import type { Project, TimeEntry } from "@/lib/types";
 
 function isoDay(d: Date): string {
@@ -100,7 +101,7 @@ export default function ReportsView({
       supabase
         .from("time_entries")
         .select(
-          "id, started_at, stopped_at, user_id, project_id, description, profiles(full_name, email, avatar_initials, avatar_color), projects(name), tasks(title)"
+          "id, started_at, stopped_at, user_id, project_id, description, profiles(full_name, email, avatar_initials, avatar_color), projects(name), tasks(title), time_entry_billings(billing_number, billing_status, billing_url)"
         )
         .eq("workspace_id", wsId)
         .not("stopped_at", "is", null)
@@ -526,6 +527,7 @@ export default function ReportsView({
                   <tr key={entry.id} className="border-b border-line/50 last:border-0">
                     <td className="whitespace-nowrap px-3 py-2 text-ink-soft">
                       {fmtDate(entry.started_at)}
+                      <BilledBadge billing={entry.time_entry_billings} className="mt-0.5 flex" />
                     </td>
                     <td className="max-w-64 px-3 py-1">
                       {editable ? (

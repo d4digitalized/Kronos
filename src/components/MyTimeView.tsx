@@ -14,6 +14,7 @@ import {
 import { confirmDialog } from "@/lib/confirm";
 import Picker from "@/components/Picker";
 import ProjectPicker, { ProjectDot } from "@/components/ProjectPicker";
+import BilledBadge from "@/components/BilledBadge";
 import type { Project, Task, TimeEntry } from "@/lib/types";
 import { ListSkeleton } from "@/components/Skeletons";
 
@@ -65,7 +66,9 @@ export default function MyTimeView({
     const [entriesRes, projectsRes] = await Promise.all([
       supabase
         .from("time_entries")
-        .select("*, tasks(title), projects(name)")
+        .select(
+          "*, tasks(title), projects(name), time_entry_billings(billing_number, billing_status, billing_url)"
+        )
         .eq("workspace_id", wsId)
         .eq("user_id", userId)
         .gte("started_at", since.toISOString())
@@ -370,6 +373,7 @@ export default function MyTimeView({
                           <span className="truncate">
                             {entry.projects?.name ?? "Bez projektu"}
                           </span>
+                          <BilledBadge billing={entry.time_entry_billings} />
                         </p>
                       </div>
                       <span className="text-xs text-ink-soft">
