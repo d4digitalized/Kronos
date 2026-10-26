@@ -6,13 +6,15 @@ import { syncTaskCalendarCore } from "@/lib/calendarSync";
 import { posBetween } from "@/lib/position";
 import { entrySeconds } from "@/lib/format";
 import {
-  daylistOwner,
+  defaultFirmId,
   hhmm,
+  loadDayFirms,
   loadPlannedCards,
   pragueToday,
   queryDayItems,
+  setCardDone,
 } from "@/lib/dayList";
-import type { DayItem } from "@/lib/types";
+import type { DayFirm, DayItem } from "@/lib/types";
 
 /** Datum+čas v Europe/Prague → UTC Date (server běží v UTC; respektuje
     letní/zimní čas daného dne). */
@@ -138,6 +140,19 @@ async function daylistLocked(
 }
 
 const LINK_RE = /^(https?:\/\/|mailto:)/i;
+
+/** Firma denního listu podle workspace_id nebo názvu (bez ohledu na
+    velikost písmen); prázdné = domovská. Vrací workspace_id, nebo chybu. */
+function resolveFirm(firms: DayFirm[], value: string | undefined): string | { error: string } {
+  const wanted = value?.trim().toLowerCase();
+  if (!wanted) return defaultFirmId(firms) ?? { error: "Uživatel nemá žádnou firmu." };
+  const hit = firms.find(
+    (f) => f.workspace_id === value?.trim() || f.name.trim().toLowerCase() === wanted
+  );
+  return hit
+    ? hit.workspace_id
+    : { error: `Firma „${value}“ v denním listu není. K dispozici: ${firms.map((f) => f.name).join(", ")}` };
+}
 
 /** „HH:MM" se smysluplnými hodinami a minutami. */
 function validTime(t: string): boolean {
@@ -1464,8 +1479,9 @@ export function registerTools(server: McpServer): void {
   );
 
   // -------------------------------------------------------- denní list
-  // Osobní todolist na den (/den, tabulka day_items, migrace 0053) — mimo
-  // karty Kronosu, jeden napříč firmami. Agent sem ráno píše, co má uživatel
+  // Osobní todolist na den (/den, tabulka day_items, migrace 0053/0054) —
+  // mimo karty Kronosu. Skládá položky všech propojených účtů (účet na
+  // firmu); každá položka nese firmu. Agent sem ráno píše, co má uživatel
   // ten den udělat; přes den si do něj uživatel připisuje sám.
 
   server.registerTool(
@@ -1473,7 +1489,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Denní list",
       description:
-        "Denní list uživatele (/den) na daný den: vlastní položky (u dneška i nedodělané ze starších dnů — carried_from) a karty Kronosu naplánované na ten den v Mém dni (planned_tasks, jen pro čtení; dokončují se přes complete_task). Před add_day_items se podívej, co už v listu je, ať nevznikají duplicity.",
+        "Denní list uživatele (/den) na daný den: firmy, do kterých lze položky dávat (firms — u propojených účtů všechny jejich firmy, is_home = výchozí), vlastní položky s firmou (u dneška i nedodělané ze starších dnů — carried_from) a karty Kronosu naplánované na ten den v Mém dni všech propojených účtů (planned_tasks; odškrtávají se přes complete_day_card). Před add_day_items se podívej, co už v listu je, ať nevznikají duplicity.",
       inputSchema: {
         date: z
           .string()
@@ -1490,22 +1506,28 @@ export function registerTools(server: McpServer): void {
       if (!DATE_RE.test(day)) return fail("Formát data: YYYY-MM-DD.");
       const start = pragueDate(day, "00:00").toISOString();
       const end = pragueDate(nextDay(day), "00:00").toISOString();
-      // propojené účty (účet na firmu) sdílí list vlastníka; karty jsou
-      // jen toho účtu, pod kterým agent běží
-      const owner = await daylistOwner(client, userId);
-      const [itemsRes, cardsRes] = await Promise.all([
-        queryDayItems(client, owner, day, today, start),
-        loadPlannedCards(client, userId, start, end),
+      const [firmsRes, itemsRes, cardsRes] = await Promise.all([
+        loadDayFirms(client),
+        queryDayItems(client, day, today, start),
+        loadPlannedCards(client, start, end),
       ]);
+      if (firmsRes.error) return fail(firmsRes.error);
       if (itemsRes.error) return fail(itemsRes.error.message);
       if (cardsRes.error) return fail(cardsRes.error);
+      const firmName = new Map(firmsRes.firms.map((f) => [f.workspace_id, f.name]));
       const items = (itemsRes.data ?? []) as DayItem[];
       return ok({
         date: day,
+        firms: firmsRes.firms.map((f) => ({
+          workspace_id: f.workspace_id,
+          name: f.name,
+          is_home: f.is_home,
+        })),
         items: items.map((i) => {
           const carried = i.day < day;
           return {
             id: i.id,
+            firm: firmName.get(i.workspace_id) ?? null,
             // přenesená položka čas ztrácí (v listu je mezi Ostatními)
             time: carried ? null : hhmm(i.at),
             title: i.title,
@@ -1521,10 +1543,10 @@ export function registerTools(server: McpServer): void {
         planned_tasks: cardsRes.cards.map((t) => ({
           task_id: t.id,
           title: t.title,
-          from: pragueStamp(t.planned_start ?? null)?.slice(11),
-          to: pragueStamp(t.planned_end ?? null)?.slice(11),
-          workspace: t.workspaces?.name ?? null,
-          project: t.projects?.name ?? null,
+          from: pragueStamp(t.planned_start)?.slice(11),
+          to: pragueStamp(t.planned_end)?.slice(11),
+          workspace: t.workspace_name,
+          project: t.project_name,
           done: !!t.completed_at,
         })),
       });
@@ -1536,7 +1558,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Přidat do denního listu",
       description:
-        "Přidá položky do denního listu uživatele (/den) — typicky ráno: co má ten den udělat. Položka s časem jde mezi Naplánované (řazené podle času), bez času mezi Ostatní. Text krátký a akční; kontext a důvod patří do note, zdroj (mail, karta, kalendář) do link_url. Nejsou to karty Kronosu — kartu si z položky udělá uživatel sám. Nedodělané z minulých dnů se přenáší samy, znovu je nepřidávej.",
+        "Přidá položky do denního listu uživatele (/den) — typicky ráno: co má ten den udělat. Každá položka patří firmě (firm z list_day.firms; bez ní domovská). Položka s časem jde mezi Naplánované (řazené podle času), bez času mezi Ostatní. Text krátký a akční; kontext a důvod patří do note, zdroj (mail, karta, kalendář) do link_url. Nejsou to karty Kronosu — kartu si z položky udělá uživatel sám. Nedodělané z minulých dnů se přenáší samy, znovu je nepřidávej.",
       inputSchema: {
         date: z
           .string()
@@ -1546,6 +1568,10 @@ export function registerTools(server: McpServer): void {
           .array(
             z.object({
               title: z.string().describe("co udělat, jedna krátká věta"),
+              firm: z
+                .string()
+                .optional()
+                .describe("firma: název nebo workspace_id z list_day.firms; výchozí domovská"),
               time: z
                 .string()
                 .optional()
@@ -1574,19 +1600,23 @@ export function registerTools(server: McpServer): void {
       if (locked) return fail(locked);
       const day = date?.trim() || pragueToday();
       if (!DATE_RE.test(day)) return fail("Formát data: YYYY-MM-DD.");
-      const owner = await daylistOwner(client, userId);
+      const firmsRes = await loadDayFirms(client);
+      if (firmsRes.error) return fail(firmsRes.error);
 
       const rows = [];
       for (const [n, it] of items.entries()) {
         const title = it.title.trim();
         if (!title) return fail(`Položka ${n + 1}: prázdný text.`);
+        const firm = resolveFirm(firmsRes.firms, it.firm);
+        if (typeof firm !== "string") return fail(`Položka ${n + 1}: ${firm.error}`);
         const time = it.time?.trim() || null;
         if (time && !validTime(time)) return fail(`Položka ${n + 1}: čas ve formátu HH:MM.`);
         const link = it.link_url?.trim() || null;
         if (link && !LINK_RE.test(link))
           return fail(`Položka ${n + 1}: odkaz musí začínat https://, http:// nebo mailto:.`);
+        // vlastníka (účet té firmy) doplní DB podle workspace_id
         rows.push({
-          user_id: owner,
+          workspace_id: firm,
           day,
           at: time,
           title,
@@ -1613,10 +1643,14 @@ export function registerTools(server: McpServer): void {
     {
       title: "Upravit položku denního listu",
       description:
-        "Změní položku denního listu: text, čas, poznámku, odkaz, přesune ji na jiný den nebo ji odškrtne / vrátí. Měň jen to, co zadáš. id položky je z list_day nebo add_day_items.",
+        "Změní položku denního listu: text, firmu, čas, poznámku, odkaz, přesune ji na jiný den nebo ji odškrtne / vrátí. Měň jen to, co zadáš. id položky je z list_day nebo add_day_items.",
       inputSchema: {
         item_id: z.string(),
         title: z.string().optional(),
+        firm: z
+          .string()
+          .optional()
+          .describe("jiná firma: název nebo workspace_id z list_day.firms"),
         time: z
           .string()
           .optional()
@@ -1628,7 +1662,7 @@ export function registerTools(server: McpServer): void {
         done: z.boolean().optional().describe("true = odškrtnout, false = vrátit"),
       },
     },
-    async ({ item_id, title, time, note, link_url, link_label, date, done }, extra) => {
+    async ({ item_id, title, firm, time, note, link_url, link_label, date, done }, extra) => {
       const { client, userId } = clientFor(extra);
       const locked = await daylistLocked(client, userId);
       if (locked) return fail(locked);
@@ -1637,6 +1671,13 @@ export function registerTools(server: McpServer): void {
       if (title !== undefined) {
         if (!title.trim()) return fail("Text položky nesmí být prázdný.");
         patch.title = title.trim();
+      }
+      if (firm?.trim()) {
+        const firmsRes = await loadDayFirms(client);
+        if (firmsRes.error) return fail(firmsRes.error);
+        const resolved = resolveFirm(firmsRes.firms, firm);
+        if (typeof resolved !== "string") return fail(resolved.error);
+        patch.workspace_id = resolved; // vlastník se v DB přepne s firmou
       }
       if (time !== undefined) {
         const t = time.trim();
@@ -1694,6 +1735,30 @@ export function registerTools(server: McpServer): void {
       if (error) return fail(error.message);
       if (!data?.length) return fail("Položka nenalezena.");
       return ok({ removed: item_id });
+    }
+  );
+
+  server.registerTool(
+    "complete_day_card",
+    {
+      title: "Odškrtnout kartu z denního listu",
+      description:
+        "Dokončí (nebo znovu otevře) kartu z planned_tasks denního listu — i kartu jiného propojeného účtu (jiné firmy), kterou complete_task pod tímto účtem nevidí. Zapíše se pod účtem, kterému karta patří.",
+      inputSchema: {
+        task_id: z.string().describe("task_id z list_day.planned_tasks"),
+        completed: z
+          .boolean()
+          .optional()
+          .describe("true = dokončit (výchozí), false = znovu otevřít"),
+      },
+    },
+    async ({ task_id, completed }, extra) => {
+      const { client, userId } = clientFor(extra);
+      const locked = await daylistLocked(client, userId);
+      if (locked) return fail(locked);
+      const { completedAt, error } = await setCardDone(client, task_id, completed ?? true);
+      if (error) return fail("Kartu se nepodařilo odškrtnout: " + error);
+      return ok({ task_id, completed: !!completedAt });
     }
   );
 }

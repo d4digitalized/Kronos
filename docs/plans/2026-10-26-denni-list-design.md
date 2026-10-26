@@ -78,27 +78,39 @@ vznikne **v Inboxu vybrané firmy** (bez projektu) a roztřídí se tam.
 Položka dostane `done_at` + `task_id` a mezi hotovými ukazuje „Karta v
 Inboxu FIRMA · otevřít v Kronosu".
 
-## Propojené účty (migrace 0054)
+## Firma na položce a propojené účty (migrace 0054)
 
-Jeden člověk s účtem na každou firmu (DENULAR, proStavaře, Office) má
-**jeden společný list**. `daylist_links (user_id → owner_id)`: propojený
-účet čte a píše položky vlastníka (`daylist_owner()` v RLS i jako default
-`day_items.user_id`). Jen jedna úroveň (trigger). Propojení zakládá jen
-správce přes SQL — tabulka nemá policy pro zápis, jinak by si kdokoli
-připojil cizí soukromý list.
+Jeden člověk s účtem na každou firmu (DENULAR, proStavaře, Office) vidí
+**jeden list složený z položek všech tří účtů**.
 
-Karty z Mého dne a převod na kartu zůstávají na **přihlášeném účtu**
-(otevřít/dokončit kartu jde jen účtem, který k ní má přístup). Položka
-převedená jiným propojeným účtem ukazuje „Karta v jiném účtu".
+- **Vlaječka firmy** (`day_items.workspace_id`) u každé položky. Fyzicky
+  položka patří účtu, který je členem té firmy — doplní ho trigger podle
+  firmy (přímo `user_id` přepsat nejde, mění se jen se změnou firmy).
+- **Skupina** = `daylist_links (user_id → owner_id)` + vlastník.
+  `daylist_accounts()` = účty skupiny; RLS na `day_items` pouští položky
+  všech. Jen jedna úroveň (trigger). Propojení zakládá jen správce přes
+  SQL — tabulka nemá policy pro zápis, jinak by si kdokoli připojil cizí
+  soukromý list.
+- **Výchozí firma** nové položky = firma vlastníka skupiny (u Jana Office);
+  po přidání se výběr vrací na ni. Vlaječky a výběr jen když je firem víc.
+- **Karty z Mého dne všech účtů** (`daylist_planned_cards`) — výběr jako
+  Můj den a jen karty, které by daný účet viděl i sám. **Odškrtnout jdou
+  z kteréhokoli účtu** (`daylist_set_card_done`): zapíše se pod účtem, kterému
+  karta patří (dočasně přepnuté `auth.uid()`), takže historie, notifikace i
+  opakování vidí jako aktéra člena té firmy. Otevřít kartu jde jen účtem,
+  který je ve firmě.
+- **Převod na kartu** jde do firmy z vlaječky; založit ji smí jen účet
+  z té firmy — jinak hláška „založíš, když tu budeš přihlášený jejím účtem".
 
 ## MCP pro agenty
 
 | Nástroj | Co dělá |
 |---|---|
-| `list_day` | položky dne (dnešek vč. přenesených) + naplánované karty |
-| `add_day_items` | přidá položky (`title`, `time?`, `note?`, `link_url?`, `link_label?`), `source = agent` |
-| `update_day_item` | změní text/čas/poznámku/odkaz, přesune na jiný den, odškrtne |
+| `list_day` | firmy skupiny, položky dne (dnešek vč. přenesených) + naplánované karty všech účtů |
+| `add_day_items` | přidá položky (`title`, `firm?`, `time?`, `note?`, `link_url?`, `link_label?`), `source = agent` |
+| `update_day_item` | změní text/firmu/čas/poznámku/odkaz, přesune na jiný den, odškrtne |
 | `remove_day_item` | smaže položku |
+| `complete_day_card` | odškrtne kartu z Mého dne kteréhokoli propojeného účtu |
 
 Datum se zadává `YYYY-MM-DD` (výchozí dnešek v Europe/Prague). Bez flagu
 `can_daylist` nástroje odmítnou.

@@ -13,16 +13,20 @@ import {
   dayHeading,
   dayHref,
   dayShort,
+  defaultFirmId,
   hhmm,
   linkLabel,
   loadPlannedCards,
   parseTimePrefix,
   queryDayItems,
+  setCardDone,
 } from "@/lib/dayList";
-import type { DayItem, PlannedCard, Workspace } from "@/lib/types";
+import type { DayFirm, DayItem, PlannedCard } from "@/lib/types";
 
-// poslední firma, do které šla karta z položky (per prohlížeč)
-const FIRM_KEY = "kronos:daylist-firm";
+// barvy vlaječek firem (odlišné i světlostí, ne jen odstínem)
+const FIRM_COLORS = ["#2f5bd3", "#c2410c", "#0e7569", "#7c3aed", "#a16207"];
+
+type Firm = { name: string; color: string };
 
 /** Půlnoc dne v místním čase jako ISO (hranice pro done_at / planned_start). */
 function dayStartISO(day: string): string {
@@ -43,23 +47,25 @@ const byTime = (a: Row, b: Row) => (a.time ?? "").localeCompare(b.time ?? "");
 
 /** Denní list: co mám dnes udělat — mimo karty, bez menu a timeru. Ráno ho
     plní agenti (MCP), přes den si sem píšu sám; z položky jde udělat karta.
-    Nedodělané z minulých dnů se přiberou při načtení dneška (nic se
-    nepřesouvá), karty z Mého dne se přimíchají mezi Naplánované. */
+    Skládá položky všech propojených účtů (účet na firmu) — každá nese
+    vlaječku firmy. Nedodělané z minulých dnů se přiberou při načtení
+    dneška (nic se nepřesouvá), karty z Mého dne se přimíchají mezi
+    Naplánované a odškrtnout jdou z kteréhokoli účtu. */
 export default function DayListView({
-  userId,
-  ownerId,
   day,
   today,
   firms,
+  mineIds,
+  creatableIds,
 }: {
-  /** přihlášený — jeho karty z Mého dne */
-  userId: string;
-  /** vlastník listu — u propojených účtů jiný než přihlášený */
-  ownerId: string;
   day: string;
   today: string;
-  /** firmy, kde smím zakládat karty (cíl převodu položky) */
-  firms: Workspace[];
+  /** firmy všech propojených účtů, domovská první */
+  firms: DayFirm[];
+  /** firmy přihlášeného účtu — karty v nich jde otevřít */
+  mineIds: string[];
+  /** firmy, kam přihlášený účet smí zakládat karty */
+  creatableIds: string[];
 }) {
   const supabase = createClient();
   const [items, setItems] = useState<DayItem[]>([]);
@@ -68,7 +74,9 @@ export default function DayListView({
   const [loadError, setLoadError] = useState(false);
   // pořadí načítání: starší odpověď nesmí přepsat novější
   const loadSeq = useRef(0);
+  const homeFirm = defaultFirmId(firms) ?? "";
   const [draft, setDraft] = useState("");
+  const [addFirm, setAddFirm] = useState(homeFirm);
   const [adding, setAdding] = useState(false);
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [showDone, setShowDone] = useState(false);
@@ -77,14 +85,24 @@ export default function DayListView({
   const isToday = day === today;
   const isPast = day < today;
   const heading = dayHeading(day, today);
+  // vlaječky jen když je z čeho vybírat
+  const showFirms = firms.length > 1;
+  const firmById = new Map<string, Firm>(
+    firms.map((f, i) => [
+      f.workspace_id,
+      { name: f.name, color: FIRM_COLORS[i % FIRM_COLORS.length] },
+    ])
+  );
+  const firmOf = (id: string): Firm =>
+    firmById.get(id) ?? { name: "?", color: "var(--color-day-faint)" };
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     const start = dayStartISO(day);
     const end = dayStartISO(addDays(day, 1));
     const [itemsRes, cardsRes] = await Promise.all([
-      queryDayItems(supabase, ownerId, day, today, start),
-      loadPlannedCards(supabase, userId, start, end),
+      queryDayItems(supabase, day, today, start),
+      loadPlannedCards(supabase, start, end),
     ]);
     if (seq !== loadSeq.current) return;
     setLoading(false);
@@ -96,7 +114,7 @@ export default function DayListView({
     setLoadError(false);
     setItems((itemsRes.data ?? []) as DayItem[]);
     setCards(cardsRes.cards);
-  }, [supabase, userId, ownerId, day, today]);
+  }, [supabase, day, today]);
 
   useEffect(() => {
     load();
@@ -126,33 +144,37 @@ export default function DayListView({
   }
 
   async function toggleCard(card: PlannedCard) {
-    const completed_at = card.completed_at ? null : new Date().toISOString();
+    const done = !card.completed_at;
     const setCompleted = (value: string | null) =>
       setCards((list) =>
         list.map((c) => (c.id === card.id ? { ...c, completed_at: value } : c))
       );
-    setCompleted(completed_at);
-    const { error } = await supabase
-      .from("tasks")
-      .update({ completed_at })
-      .eq("id", card.id);
+    setCompleted(done ? new Date().toISOString() : null);
+    const { completedAt, error } = await setCardDone(supabase, card.id, done);
     if (error) {
       setCompleted(card.completed_at);
       toast("Kartu se nepodařilo uložit.", "error");
       return;
     }
-    if (completed_at) pingNotifyEmails(); // opakovaná karta může přiřadit další výskyt
+    setCompleted(completedAt);
+    if (done) pingNotifyEmails(); // opakovaná karta může přiřadit další výskyt
   }
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
     const text = draft.trim();
-    if (!text || adding) return;
+    if (!text || adding || !addFirm) return;
     const timed = parseTimePrefix(text);
     setAdding(true);
     const { data, error } = await supabase
       .from("day_items")
-      .insert({ day, at: timed?.time ?? null, title: timed?.title ?? text, source: "me" })
+      .insert({
+        day,
+        workspace_id: addFirm,
+        at: timed?.time ?? null,
+        title: timed?.title ?? text,
+        source: "me",
+      })
       .select("*")
       .single();
     setAdding(false);
@@ -162,6 +184,7 @@ export default function DayListView({
     }
     setItems((list) => [...list, data as DayItem]);
     setDraft("");
+    setAddFirm(homeFirm); // výchozí je vždy domovská firma
   }
 
   async function moveToTomorrow(item: DayItem) {
@@ -189,13 +212,14 @@ export default function DayListView({
     }
   }
 
-  /** Karta v Inboxu vybrané firmy; položka se odškrtne a odkáže na ni. */
-  async function promote(item: DayItem, title: string, firm: Workspace): Promise<boolean> {
+  /** Karta v Inboxu firmy položky; položka se odškrtne a odkáže na ni. */
+  async function promote(item: DayItem, title: string): Promise<boolean> {
+    const firm = firmOf(item.workspace_id);
     const description = [item.note, item.link_url].filter(Boolean).join("\n\n");
     const { data: task, error } = await supabase
       .from("tasks")
       .insert({
-        workspace_id: firm.id,
+        workspace_id: item.workspace_id,
         project_id: null,
         column_id: null,
         title,
@@ -208,9 +232,6 @@ export default function DayListView({
       toast("Kartu se nepodařilo založit.", "error");
       return false;
     }
-    try {
-      localStorage.setItem(FIRM_KEY, firm.id);
-    } catch {}
     const done_at = new Date().toISOString();
     const { error: linkError } = await supabase
       .from("day_items")
@@ -221,11 +242,7 @@ export default function DayListView({
       load();
       return true;
     }
-    patchItem(item.id, {
-      done_at,
-      task_id: task.id as string,
-      tasks: { workspaces: { name: firm.name } },
-    });
+    patchItem(item.id, { done_at, task_id: task.id as string });
     setShowDone(true);
     toast(`Karta je v Inboxu ${firm.name}.`);
     return true;
@@ -249,12 +266,7 @@ export default function DayListView({
     (item.done_at ? doneRows : openRows).push(row);
   }
   for (const card of cards) {
-    const row: Row = {
-      kind: "card",
-      key: card.id,
-      time: localHHMM(card.planned_start!),
-      card,
-    };
+    const row: Row = { kind: "card", key: card.id, time: localHHMM(card.planned_start), card };
     (card.completed_at ? doneRows : openRows).push(row);
   }
   const planned = openRows.filter((r) => r.time).sort(byTime);
@@ -295,6 +307,7 @@ export default function DayListView({
       : "Zatím prázdné. Agenti ho naplní ráno, ty si sem můžeš psát už teď.";
 
   const draftTimed = parseTimePrefix(draft);
+  const tagOf = (workspaceId: string) => (showFirms ? firmOf(workspaceId) : null);
 
   return (
     <main className="mx-auto flex w-full max-w-[640px] flex-col gap-7 px-5 pb-20 pt-4">
@@ -342,15 +355,39 @@ export default function DayListView({
           onSubmit={add}
           className="-ml-[11px] flex items-center gap-0.5 border-b-[1.5px] border-day-line focus-within:border-day-ink"
         >
-          <label htmlFor="day-new" className="sr-only">
-            Nový úkol
-          </label>
           <span
             aria-hidden
             className="flex h-12 w-11 shrink-0 items-center justify-center text-day-muted"
           >
             <Icon d="M12 5v14M5 12h14" size={20} />
           </span>
+          {showFirms && (
+            <span className="flex shrink-0 items-center gap-1.5 pr-2">
+              <span
+                aria-hidden
+                className="size-2 rounded-full"
+                style={{ backgroundColor: firmOf(addFirm).color }}
+              />
+              <label htmlFor="day-firm" className="sr-only">
+                Firma
+              </label>
+              <select
+                id="day-firm"
+                value={addFirm}
+                onChange={(e) => setAddFirm(e.target.value)}
+                className="h-8 max-w-[9rem] bg-transparent text-[13px] font-medium text-day-muted hover:text-day-ink"
+              >
+                {firms.map((f) => (
+                  <option key={f.workspace_id} value={f.workspace_id}>
+                    {f.name}
+                  </option>
+                ))}
+              </select>
+            </span>
+          )}
+          <label htmlFor="day-new" className="sr-only">
+            Nový úkol
+          </label>
           <input
             id="day-new"
             type="text"
@@ -418,22 +455,30 @@ export default function DayListView({
                   <ul>
                     {section.rows.map((row) =>
                       row.kind === "card" ? (
-                        <CardRowView key={row.key} row={row} onToggle={toggleCard} />
+                        <CardRowView
+                          key={row.key}
+                          row={row}
+                          firm={tagOf(row.card.workspace_id)}
+                          canOpen={mineIds.includes(row.card.workspace_id)}
+                          onToggle={toggleCard}
+                        />
                       ) : (
                         <ItemRowView
                           key={row.key}
                           row={row}
+                          firm={tagOf(row.item.workspace_id)}
                           menuOpen={menuFor === row.item.id}
                           onToggle={toggleItem}
                           onMenu={(id) => setMenuFor((cur) => (cur === id ? null : id))}
                           onPromote={
-                            firms.length
+                            creatableIds.includes(row.item.workspace_id)
                               ? (item) => {
                                   setMenuFor(null);
                                   setPromoting(item);
                                 }
                               : null
                           }
+                          promoteElsewhere={firmOf(row.item.workspace_id).name}
                           onTomorrow={isToday ? moveToTomorrow : null}
                           onRemove={remove}
                         />
@@ -461,14 +506,21 @@ export default function DayListView({
               </button>
               {showDone && (
                 <ul>
-                  {doneRows.map((row) => (
-                    <DoneRowView
-                      key={row.key}
-                      row={row}
-                      onToggleItem={toggleItem}
-                      onToggleCard={toggleCard}
-                    />
-                  ))}
+                  {doneRows.map((row) => {
+                    const workspaceId =
+                      row.kind === "item" ? row.item.workspace_id : row.card.workspace_id;
+                    return (
+                      <DoneRowView
+                        key={row.key}
+                        row={row}
+                        firm={tagOf(workspaceId)}
+                        firmName={firmOf(workspaceId).name}
+                        canOpen={mineIds.includes(workspaceId)}
+                        onToggleItem={toggleItem}
+                        onToggleCard={toggleCard}
+                      />
+                    );
+                  })}
                 </ul>
               )}
             </section>
@@ -488,9 +540,9 @@ export default function DayListView({
       {promoting && (
         <PromoteDialog
           item={promoting}
-          firms={firms}
+          firmName={firmOf(promoting.workspace_id).name}
           onClose={closePromote}
-          onSubmit={(title, firm) => promote(promoting, title, firm)}
+          onSubmit={(title) => promote(promoting, title)}
         />
       )}
     </main>
@@ -510,24 +562,31 @@ const PILL = "h-11 rounded-full border border-day-line px-4 text-sm hover:border
 
 function ItemRowView({
   row,
+  firm,
   menuOpen,
   onToggle,
   onMenu,
   onPromote,
+  promoteElsewhere,
   onTomorrow,
   onRemove,
 }: {
   row: Extract<Row, { kind: "item" }>;
+  /** vlaječka firmy; null = jediná firma, nic neukazovat */
+  firm: Firm | null;
   menuOpen: boolean;
   onToggle: (item: DayItem) => void;
   onMenu: (id: string) => void;
+  /** null = do firmy položky přihlášený účet karty nezakládá */
   onPromote: ((item: DayItem) => void) | null;
+  /** název firmy položky — do hlášky, kde kartu založit */
+  promoteElsewhere: string;
   onTomorrow: ((item: DayItem) => void) | null;
   onRemove: (item: DayItem) => void;
 }) {
   const { item, time, carried } = row;
   const agent = item.source === "agent";
-  const hasMeta = agent || !!carried || !!item.note || !!item.link_url;
+  const hasMeta = !!firm || agent || !!carried || !!item.note || !!item.link_url;
   return (
     <li className={ROW}>
       <button
@@ -542,6 +601,7 @@ function ItemRowView({
         <p className={TITLE}>{item.title}</p>
         {hasMeta && (
           <p className={META}>
+            {firm && <FirmTag firm={firm} />}
             {agent && <AgentMark />}
             {carried && <span className="font-medium text-day-brass">{carried}</span>}
             {item.note && <span className="break-words">{item.note}</span>}
@@ -549,7 +609,7 @@ function ItemRowView({
           </p>
         )}
         {menuOpen && (
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             {onPromote && (
               <button
                 onClick={() => onPromote(item)}
@@ -567,6 +627,11 @@ function ItemRowView({
             <button onClick={() => onRemove(item)} className={PILL}>
               Smazat
             </button>
+            {!onPromote && (
+              <p className="basis-full text-[13px] text-day-muted">
+                Kartu do {promoteElsewhere} založíš, když tu budeš přihlášený jejím účtem.
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -586,12 +651,16 @@ function ItemRowView({
   );
 }
 
-/** Karta z Mého dne: odškrtnutí ji v Kronosu dokončí. */
+/** Karta z Mého dne (kteréhokoli propojeného účtu): odškrtnutí ji dokončí. */
 function CardRowView({
   row,
+  firm,
+  canOpen,
   onToggle,
 }: {
   row: Extract<Row, { kind: "card" }>;
+  firm: Firm | null;
+  canOpen: boolean;
   onToggle: (card: PlannedCard) => void;
 }) {
   const { card, time } = row;
@@ -607,37 +676,55 @@ function CardRowView({
       <span className={`${TIME} font-semibold`}>{time}</span>
       <div className={TEXT}>
         <p className={TITLE}>{card.title}</p>
-        <CardMeta card={card} />
+        <CardMeta card={card} firm={firm} canOpen={canOpen} />
       </div>
     </li>
   );
 }
 
-function CardMeta({ card }: { card: PlannedCard }) {
-  const where = [card.workspaces?.name, card.projects?.name].filter(Boolean).join(" · ");
+function CardMeta({
+  card,
+  firm,
+  canOpen,
+}: {
+  card: PlannedCard;
+  firm: Firm | null;
+  canOpen: boolean;
+}) {
   return (
     <p className={META}>
       <span title="Karta z Mého dne" className="inline-flex">
         <NavIcon d={ICONS.board} className="size-[14px]" />
       </span>
-      {where && <span>{where}</span>}
-      <Link
-        href={`/t/${card.id}`}
-        className="inline-flex items-center gap-0.5 text-day-ink underline decoration-day-faint underline-offset-[3px]"
-      >
-        karta
-        <Icon d="M7 17L17 7M8 7h9v9" size={13} />
-      </Link>
+      {firm && <FirmTag firm={firm} />}
+      {card.project_name && <span>{card.project_name}</span>}
+      {/* kartu jiné firmy přihlášený účet neotevře (RLS) */}
+      {canOpen && (
+        <Link
+          href={`/t/${card.id}`}
+          className="inline-flex items-center gap-0.5 text-day-ink underline decoration-day-faint underline-offset-[3px]"
+        >
+          karta
+          <Icon d="M7 17L17 7M8 7h9v9" size={13} />
+        </Link>
+      )}
     </p>
   );
 }
 
 function DoneRowView({
   row,
+  firm,
+  firmName,
+  canOpen,
   onToggleItem,
   onToggleCard,
 }: {
   row: Row;
+  firm: Firm | null;
+  firmName: string;
+  /** přihlášený účet je ve firmě řádku — kartu jde otevřít */
+  canOpen: boolean;
   onToggleItem: (item: DayItem) => void;
   onToggleCard: (card: PlannedCard) => void;
 }) {
@@ -673,23 +760,20 @@ function DoneRowView({
         <p className={`${TITLE} text-day-muted ${converted ? "" : "line-through"}`}>{title}</p>
         {converted && row.kind === "item" && (
           <p className={META}>
-            {row.item.tasks?.workspaces?.name ? (
-              <>
-                <span>Karta v Inboxu {row.item.tasks.workspaces.name}</span>
-                <Link
-                  href={`/t/${row.item.task_id}`}
-                  className="text-day-ink underline-offset-[3px] hover:underline"
-                >
-                  otevřít v Kronosu
-                </Link>
-              </>
+            <span>Karta v Inboxu {firmName}</span>
+            {canOpen ? (
+              <Link
+                href={`/t/${row.item.task_id}`}
+                className="text-day-ink underline-offset-[3px] hover:underline"
+              >
+                otevřít v Kronosu
+              </Link>
             ) : (
-              // kartu založil propojený účet — odsud ji RLS neukáže
-              <span>Karta v jiném účtu</span>
+              <span>· otevřeš pod jejím účtem</span>
             )}
           </p>
         )}
-        {row.kind === "card" && <CardMeta card={row.card} />}
+        {row.kind === "card" && <CardMeta card={row.card} firm={firm} canOpen={canOpen} />}
       </div>
     </li>
   );
@@ -728,6 +812,15 @@ function PastRowView({ row, done }: { row: Row; done: boolean }) {
 }
 
 // ------------------------------------------------------------- drobnosti
+
+function FirmTag({ firm }: { firm: Firm }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span aria-hidden className="size-2 rounded-full" style={{ backgroundColor: firm.color }} />
+      {firm.name}
+    </span>
+  );
+}
 
 function ItemLink({ item }: { item: DayItem }) {
   return (
@@ -774,25 +867,17 @@ function Icon({ d, size = 16, strokeWidth = 2 }: { d: string; size?: number; str
 
 function PromoteDialog({
   item,
-  firms,
+  firmName,
   onClose,
   onSubmit,
 }: {
   item: DayItem;
-  firms: Workspace[];
+  firmName: string;
   onClose: () => void;
-  onSubmit: (title: string, firm: Workspace) => Promise<boolean>;
+  onSubmit: (title: string) => Promise<boolean>;
 }) {
   const [title, setTitle] = useState(item.title);
-  const [firmId, setFirmId] = useState(() => {
-    let saved: string | null = null;
-    try {
-      saved = localStorage.getItem(FIRM_KEY);
-    } catch {}
-    return firms.find((f) => f.id === saved)?.id ?? firms[0].id;
-  });
   const [saving, setSaving] = useState(false);
-  const firm = firms.find((f) => f.id === firmId) ?? firms[0];
   const description = [item.note, item.link_url].filter(Boolean).join(" · ");
 
   useEffect(() => {
@@ -808,7 +893,7 @@ function PromoteDialog({
     const name = title.trim();
     if (!name || saving) return;
     setSaving(true);
-    const created = await onSubmit(name, firm);
+    const created = await onSubmit(name);
     setSaving(false);
     if (created) onClose();
   }
@@ -853,35 +938,9 @@ function PromoteDialog({
             <p className="break-words text-[15px]">{description}</p>
           </div>
         )}
-        {firms.length > 1 && (
-          <fieldset className="min-w-0">
-            <legend className="mb-2 text-[13px] text-day-muted">Firma</legend>
-            <div className="flex flex-wrap gap-2">
-              {firms.map((f) => {
-                const selected = f.id === firm.id;
-                return (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={() => setFirmId(f.id)}
-                    aria-pressed={selected}
-                    className={`h-11 rounded-full border px-4 text-sm font-medium ${
-                      selected
-                        ? "border-day-ink bg-day-ink text-day-bg"
-                        : "border-day-line hover:border-day-ink"
-                    }`}
-                  >
-                    {f.name}
-                  </button>
-                );
-              })}
-            </div>
-          </fieldset>
-        )}
         <p className="text-sm text-day-muted">
-          Karta přistane v Inboxu {firms.length > 1 ? "vybrané firmy" : firm.name} a
-          roztřídíš ji tam jako každou jinou. Položka tady se odškrtne a bude na kartu
-          odkazovat.
+          Karta přistane v Inboxu {firmName} a roztřídíš ji tam jako každou jinou. Položka
+          tady se odškrtne a bude na kartu odkazovat.
         </p>
         <div className="flex flex-wrap justify-end gap-2">
           <button type="button" onClick={onClose} className={PILL}>

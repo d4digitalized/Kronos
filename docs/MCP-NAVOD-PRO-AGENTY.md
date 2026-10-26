@@ -74,11 +74,12 @@ uživatel v aplikaci.
 - `list_time_entries(from, to, workspace_id?, user_id?, project_id?, summary_only?)` — součty po lidech, projektech a jejich kombinaci + záznamy. Vidíš své; admin všechny; HR s grantem.
 
 ### Denní list
-- `list_day(date?)` — položky dne (u dneška i přenesené, `carried_from`) a karty naplánované v Mém dni (`planned_tasks`, jen ke čtení — dokončují se `complete_task`).
-- `add_day_items(date?, items[])` — každá položka `title`, volitelně `time` (HH:MM → Naplánované), `note` (kontext / proč), `link_url` (https:// nebo mailto:), `link_label` (mail, kalendář, Kronos…).
-- `update_day_item(item_id, title?, time?, note?, link_url?, link_label?, date?, done?)` — prázdný řetězec hodnotu smaže; `date` položku přesune.
+- `list_day(date?)` — firmy (`firms`, `is_home` = výchozí), položky dne s firmou (u dneška i přenesené, `carried_from`) a karty naplánované v Mém dni všech propojených účtů (`planned_tasks`).
+- `add_day_items(date?, items[])` — každá položka `title`, volitelně `firm` (název z `firms`; bez něj domovská), `time` (HH:MM → Naplánované), `note` (kontext / proč), `link_url` (https:// nebo mailto:), `link_label` (mail, kalendář, Kronos…).
+- `update_day_item(item_id, title?, firm?, time?, note?, link_url?, link_label?, date?, done?)` — prázdný řetězec hodnotu smaže; `date` položku přesune.
 - `remove_day_item(item_id)`.
-- Propojené účty (účet na firmu) sdílí jeden list — je jedno, pod kterým tokenem agent běží. `planned_tasks` ale vrací jen karty účtu, pod kterým běží.
+- `complete_day_card(task_id, completed?)` — odškrtne kartu z `planned_tasks`, i jiného propojeného účtu.
+- Propojené účty (účet na firmu: DENULAR, proStavaře, Office) vidí jeden list — je jedno, pod kterým tokenem agent běží. Položku označ firmou, ke které věcně patří (mail z DENULAR → DENULAR); osobní věci → domovská firma.
 
 ## Pravidla pro agenta
 

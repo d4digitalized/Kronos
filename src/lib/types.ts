@@ -114,10 +114,14 @@ export type Task = {
   board_columns?: { name: string } | null;
 };
 
-/** Položka denního listu (/den) — mimo karty, soukromá, napříč firmami. */
+/** Položka denního listu (/den) — mimo karty, soukromá; list skládá
+    položky všech propojených účtů (účet na firmu, migrace 0054). */
 export type DayItem = {
   id: string;
+  /** účet, který je členem firmy položky (nastavuje DB podle workspace_id) */
   user_id: string;
+  /** firma, kam položka patří („vlaječka") */
+  workspace_id: string;
   /** YYYY-MM-DD, den v Europe/Prague */
   day: string;
   /** „HH:MM:SS" → Naplánované; null → Ostatní */
@@ -131,17 +135,29 @@ export type DayItem = {
   /** převedeno na kartu (karta vznikla v Inboxu firmy) */
   task_id: string | null;
   created_at: string;
-  tasks?: { workspaces: { name: string } | null } | null;
 };
 
-/** Karta naplánovaná v Mém dni — v denním listu mezi Naplánovanými. */
-export type PlannedCard = Pick<
-  Task,
-  "id" | "title" | "planned_start" | "planned_end" | "completed_at" | "workspace_id"
-> & {
-  workspaces?: { name: string } | null;
-  projects?: { name: string } | null;
-  task_assignees?: { user_id: string }[];
+/** Firma propojené skupiny účtů (daylist_firms) — vlaječka položky. */
+export type DayFirm = {
+  workspace_id: string;
+  name: string;
+  /** účet skupiny, kterým do firmy patřím */
+  account_id: string;
+  /** firma domovského účtu — výchozí pro nové položky */
+  is_home: boolean;
+};
+
+/** Karta naplánovaná v Mém dni kteréhokoli propojeného účtu
+    (daylist_planned_cards) — v denním listu mezi Naplánovanými. */
+export type PlannedCard = {
+  id: string;
+  title: string;
+  planned_start: string;
+  planned_end: string | null;
+  completed_at: string | null;
+  workspace_id: string;
+  workspace_name: string;
+  project_name: string | null;
 };
 
 export type Label = {

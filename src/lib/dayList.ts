@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { DayItem, PlannedCard } from "@/lib/types";
+import type { DayFirm, DayItem, PlannedCard } from "@/lib/types";
 
 // Denní list (/den): data a popisky dnů sdílené stránkou, klientským view
 // i MCP nástroji. Den = "YYYY-MM-DD" v Europe/Prague; v URL zkráceně YY-MM-DD.
@@ -123,32 +123,36 @@ export function linkLabel(item: Pick<DayItem, "link_url" | "link_label">): strin
   }
 }
 
-/** Čí list přihlášený vidí — u propojených účtů vlastník (migrace 0054),
-    jinak on sám. Bez migrace (funkce chybí) = `self`. */
-export async function daylistOwner(client: SupabaseClient, self: string): Promise<string> {
-  const { data, error } = await client.rpc("daylist_owner");
-  if (error) {
-    if (error.code === "PGRST202") return self;
-    throw new Error(`Vlastníka denního listu se nepodařilo zjistit: ${error.message}`);
-  }
-  return (data as string | null) ?? self;
+/** Firmy propojené skupiny účtů (migrace 0054): domovská první, pak
+    abecedně. `missing` = funkce v DB chybí (migrace ještě neběží). */
+export async function loadDayFirms(
+  client: SupabaseClient
+): Promise<{ firms: DayFirm[]; error: string | null; missing: boolean }> {
+  const { data, error } = await client.rpc("daylist_firms");
+  if (error)
+    return { firms: [], error: error.message, missing: error.code === "PGRST202" };
+  const firms = ((data ?? []) as DayFirm[]).sort(
+    (a, b) => Number(b.is_home) - Number(a.is_home) || a.name.localeCompare(b.name, "cs")
+  );
+  return { firms, error: null, missing: false };
 }
 
-/** Položky dne. Dnešek si přibere i starší nehotové (přenos nedodělaných
-    se nezapisuje — děje se tady) a starší dokončené dnes. */
+/** Výchozí firma nové položky: domovská (u propojených účtů firma vlastníka). */
+export function defaultFirmId(firms: DayFirm[]): string | null {
+  return (firms.find((f) => f.is_home) ?? firms[0])?.workspace_id ?? null;
+}
+
+/** Položky dne celé skupiny (RLS vrací položky všech propojených účtů).
+    Dnešek si přibere i starší nehotové (přenos nedodělaných se nezapisuje —
+    děje se tady) a starší dokončené dnes. */
 export function queryDayItems(
   client: SupabaseClient,
-  /** vlastník listu (daylistOwner), ne nutně přihlášený */
-  ownerId: string,
   day: string,
   today: string,
   /** začátek dne `day` jako ISO (půlnoc v Europe/Prague) */
   dayStartISO: string
 ) {
-  let q = client
-    .from("day_items")
-    .select("*, tasks(workspaces(name))")
-    .eq("user_id", ownerId);
+  let q = client.from("day_items").select("*");
   q =
     day === today
       ? q.or(
@@ -158,43 +162,32 @@ export function queryDayItems(
   return q.order("day").order("created_at");
 }
 
-const CARD_SELECT =
-  "id, title, planned_start, planned_end, completed_at, workspace_id, workspaces(name), projects(name), task_assignees(user_id)";
-
-/** Karty naplánované na den v Mém dni — stejný výběr jako Můj den: řeším
-    je, nebo jsem autor karty bez řešitelů. */
+/** Karty naplánované na den v Mém dni všech propojených účtů — výběr jako
+    Můj den (řeším je, nebo jsem autor bez řešitelů). */
 export async function loadPlannedCards(
   client: SupabaseClient,
-  userId: string,
   fromISO: string,
   toISO: string
 ): Promise<{ cards: PlannedCard[]; error: string | null }> {
-  const [mineRes, createdRes] = await Promise.all([
-    client
-      .from("task_assignees")
-      .select(`tasks!inner(${CARD_SELECT})`)
-      .eq("user_id", userId)
-      .gte("tasks.planned_start", fromISO)
-      .lt("tasks.planned_start", toISO),
-    client
-      .from("tasks")
-      .select(CARD_SELECT)
-      .eq("created_by", userId)
-      .gte("planned_start", fromISO)
-      .lt("planned_start", toISO),
-  ]);
-  const error = mineRes.error ?? createdRes.error;
+  const { data, error } = await client.rpc("daylist_planned_cards", {
+    p_from: fromISO,
+    p_to: toISO,
+  });
   if (error) return { cards: [], error: error.message };
-  const mine = ((mineRes.data ?? []) as unknown as { tasks: PlannedCard }[]).map(
-    (r) => r.tasks
-  );
-  const created = ((createdRes.data ?? []) as unknown as PlannedCard[]).filter(
-    (t) => (t.task_assignees ?? []).length === 0
-  );
-  const byId = new Map<string, PlannedCard>();
-  for (const t of [...mine, ...created]) byId.set(t.id, t);
-  const cards = [...byId.values()].sort((a, b) =>
-    (a.planned_start ?? "").localeCompare(b.planned_start ?? "")
-  );
-  return { cards, error: null };
+  return { cards: (data ?? []) as PlannedCard[], error: null };
+}
+
+/** Odškrtnutí / vrácení karty z denního listu — jde z kteréhokoli účtu
+    skupiny; zapíše se pod účtem, kterému karta patří. Vrací completed_at. */
+export async function setCardDone(
+  client: SupabaseClient,
+  taskId: string,
+  done: boolean
+): Promise<{ completedAt: string | null; error: string | null }> {
+  const { data, error } = await client.rpc("daylist_set_card_done", {
+    p_task_id: taskId,
+    p_done: done,
+  });
+  if (error) return { completedAt: null, error: error.message };
+  return { completedAt: (data as string | null) ?? null, error: null };
 }
