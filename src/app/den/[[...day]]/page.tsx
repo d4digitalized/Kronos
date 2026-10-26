@@ -1,13 +1,13 @@
 import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getSessionUser } from "@/lib/session";
-import { dayFromSlug, pragueToday } from "@/lib/dayList";
+import { dayFromSlug, daylistOwner, pragueToday } from "@/lib/dayList";
 import DayListView from "@/components/DayListView";
 import type { Membership, Workspace } from "@/lib/types";
 
 // /den = dnešek (stálá adresa pro záložku), /den/26-10-26 = konkrétní den.
-// Jeden list na uživatele napříč firmami; odemyká ho flag can_daylist
-// (stačí v jedné firmě).
+// Jeden list na uživatele napříč firmami (propojené účty sdílí list
+// vlastníka); odemyká ho flag can_daylist (stačí v jedné firmě).
 export default async function DenPage({
   params,
 }: {
@@ -48,5 +48,17 @@ export default async function DenPage({
     .map((m) => m.workspaces as Workspace)
     .sort((a, b) => a.name.localeCompare(b.name, "cs"));
 
-  return <DayListView key={day} userId={user.id} day={day} today={today} firms={firms} />;
+  // propojené účty (účet na firmu) sdílí jeden list vlastníka
+  const ownerId = await daylistOwner(supabase, user.id);
+
+  return (
+    <DayListView
+      key={day}
+      userId={user.id}
+      ownerId={ownerId}
+      day={day}
+      today={today}
+      firms={firms}
+    />
+  );
 }

@@ -5,7 +5,13 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { syncTaskCalendarCore } from "@/lib/calendarSync";
 import { posBetween } from "@/lib/position";
 import { entrySeconds } from "@/lib/format";
-import { hhmm, loadPlannedCards, pragueToday, queryDayItems } from "@/lib/dayList";
+import {
+  daylistOwner,
+  hhmm,
+  loadPlannedCards,
+  pragueToday,
+  queryDayItems,
+} from "@/lib/dayList";
 import type { DayItem } from "@/lib/types";
 
 /** Datum+čas v Europe/Prague → UTC Date (server běží v UTC; respektuje
@@ -1484,8 +1490,11 @@ export function registerTools(server: McpServer): void {
       if (!DATE_RE.test(day)) return fail("Formát data: YYYY-MM-DD.");
       const start = pragueDate(day, "00:00").toISOString();
       const end = pragueDate(nextDay(day), "00:00").toISOString();
+      // propojené účty (účet na firmu) sdílí list vlastníka; karty jsou
+      // jen toho účtu, pod kterým agent běží
+      const owner = await daylistOwner(client, userId);
       const [itemsRes, cardsRes] = await Promise.all([
-        queryDayItems(client, userId, day, today, start),
+        queryDayItems(client, owner, day, today, start),
         loadPlannedCards(client, userId, start, end),
       ]);
       if (itemsRes.error) return fail(itemsRes.error.message);
@@ -1565,6 +1574,7 @@ export function registerTools(server: McpServer): void {
       if (locked) return fail(locked);
       const day = date?.trim() || pragueToday();
       if (!DATE_RE.test(day)) return fail("Formát data: YYYY-MM-DD.");
+      const owner = await daylistOwner(client, userId);
 
       const rows = [];
       for (const [n, it] of items.entries()) {
@@ -1576,7 +1586,7 @@ export function registerTools(server: McpServer): void {
         if (link && !LINK_RE.test(link))
           return fail(`Položka ${n + 1}: odkaz musí začínat https://, http:// nebo mailto:.`);
         rows.push({
-          user_id: userId,
+          user_id: owner,
           day,
           at: time,
           title,

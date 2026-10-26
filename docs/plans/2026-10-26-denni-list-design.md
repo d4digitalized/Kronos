@@ -78,6 +78,19 @@ vznikne **v Inboxu vybrané firmy** (bez projektu) a roztřídí se tam.
 Položka dostane `done_at` + `task_id` a mezi hotovými ukazuje „Karta v
 Inboxu FIRMA · otevřít v Kronosu".
 
+## Propojené účty (migrace 0054)
+
+Jeden člověk s účtem na každou firmu (DENULAR, proStavaře, Office) má
+**jeden společný list**. `daylist_links (user_id → owner_id)`: propojený
+účet čte a píše položky vlastníka (`daylist_owner()` v RLS i jako default
+`day_items.user_id`). Jen jedna úroveň (trigger). Propojení zakládá jen
+správce přes SQL — tabulka nemá policy pro zápis, jinak by si kdokoli
+připojil cizí soukromý list.
+
+Karty z Mého dne a převod na kartu zůstávají na **přihlášeném účtu**
+(otevřít/dokončit kartu jde jen účtem, který k ní má přístup). Položka
+převedená jiným propojeným účtem ukazuje „Karta v jiném účtu".
+
 ## MCP pro agenty
 
 | Nástroj | Co dělá |

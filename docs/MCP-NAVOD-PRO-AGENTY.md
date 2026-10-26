@@ -78,6 +78,7 @@ uživatel v aplikaci.
 - `add_day_items(date?, items[])` — každá položka `title`, volitelně `time` (HH:MM → Naplánované), `note` (kontext / proč), `link_url` (https:// nebo mailto:), `link_label` (mail, kalendář, Kronos…).
 - `update_day_item(item_id, title?, time?, note?, link_url?, link_label?, date?, done?)` — prázdný řetězec hodnotu smaže; `date` položku přesune.
 - `remove_day_item(item_id)`.
+- Propojené účty (účet na firmu) sdílí jeden list — je jedno, pod kterým tokenem agent běží. `planned_tasks` ale vrací jen karty účtu, pod kterým běží.
 
 ## Pravidla pro agenta
 

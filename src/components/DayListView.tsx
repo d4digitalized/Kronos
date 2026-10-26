@@ -47,11 +47,15 @@ const byTime = (a: Row, b: Row) => (a.time ?? "").localeCompare(b.time ?? "");
     nepřesouvá), karty z Mého dne se přimíchají mezi Naplánované. */
 export default function DayListView({
   userId,
+  ownerId,
   day,
   today,
   firms,
 }: {
+  /** přihlášený — jeho karty z Mého dne */
   userId: string;
+  /** vlastník listu — u propojených účtů jiný než přihlášený */
+  ownerId: string;
   day: string;
   today: string;
   /** firmy, kde smím zakládat karty (cíl převodu položky) */
@@ -79,7 +83,7 @@ export default function DayListView({
     const start = dayStartISO(day);
     const end = dayStartISO(addDays(day, 1));
     const [itemsRes, cardsRes] = await Promise.all([
-      queryDayItems(supabase, userId, day, today, start),
+      queryDayItems(supabase, ownerId, day, today, start),
       loadPlannedCards(supabase, userId, start, end),
     ]);
     if (seq !== loadSeq.current) return;
@@ -92,7 +96,7 @@ export default function DayListView({
     setLoadError(false);
     setItems((itemsRes.data ?? []) as DayItem[]);
     setCards(cardsRes.cards);
-  }, [supabase, userId, day, today]);
+  }, [supabase, userId, ownerId, day, today]);
 
   useEffect(() => {
     load();
@@ -669,17 +673,20 @@ function DoneRowView({
         <p className={`${TITLE} text-day-muted ${converted ? "" : "line-through"}`}>{title}</p>
         {converted && row.kind === "item" && (
           <p className={META}>
-            <span>
-              {row.item.tasks?.workspaces?.name
-                ? `Karta v Inboxu ${row.item.tasks.workspaces.name}`
-                : "Karta v Kronosu"}
-            </span>
-            <Link
-              href={`/t/${row.item.task_id}`}
-              className="text-day-ink underline-offset-[3px] hover:underline"
-            >
-              otevřít v Kronosu
-            </Link>
+            {row.item.tasks?.workspaces?.name ? (
+              <>
+                <span>Karta v Inboxu {row.item.tasks.workspaces.name}</span>
+                <Link
+                  href={`/t/${row.item.task_id}`}
+                  className="text-day-ink underline-offset-[3px] hover:underline"
+                >
+                  otevřít v Kronosu
+                </Link>
+              </>
+            ) : (
+              // kartu založil propojený účet — odsud ji RLS neukáže
+              <span>Karta v jiném účtu</span>
+            )}
           </p>
         )}
         {row.kind === "card" && <CardMeta card={row.card} />}

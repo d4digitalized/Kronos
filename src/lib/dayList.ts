@@ -123,11 +123,23 @@ export function linkLabel(item: Pick<DayItem, "link_url" | "link_label">): strin
   }
 }
 
+/** Čí list přihlášený vidí — u propojených účtů vlastník (migrace 0054),
+    jinak on sám. Bez migrace (funkce chybí) = `self`. */
+export async function daylistOwner(client: SupabaseClient, self: string): Promise<string> {
+  const { data, error } = await client.rpc("daylist_owner");
+  if (error) {
+    if (error.code === "PGRST202") return self;
+    throw new Error(`Vlastníka denního listu se nepodařilo zjistit: ${error.message}`);
+  }
+  return (data as string | null) ?? self;
+}
+
 /** Položky dne. Dnešek si přibere i starší nehotové (přenos nedodělaných
     se nezapisuje — děje se tady) a starší dokončené dnes. */
 export function queryDayItems(
   client: SupabaseClient,
-  userId: string,
+  /** vlastník listu (daylistOwner), ne nutně přihlášený */
+  ownerId: string,
   day: string,
   today: string,
   /** začátek dne `day` jako ISO (půlnoc v Europe/Prague) */
@@ -136,7 +148,7 @@ export function queryDayItems(
   let q = client
     .from("day_items")
     .select("*, tasks(workspaces(name))")
-    .eq("user_id", userId);
+    .eq("user_id", ownerId);
   q =
     day === today
       ? q.or(
