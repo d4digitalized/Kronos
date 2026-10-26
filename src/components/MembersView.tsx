@@ -592,6 +592,16 @@ export default function MembersView({
                   initial={member.can_notes ?? false}
                   onSaved={load}
                 />
+                {/* Denní list — osobní, napříč firmami: stačí zapnout v jedné */}
+                <MemberFlagToggle
+                  wsId={wsId}
+                  userId={member.user_id}
+                  flag="can_daylist"
+                  title="Denní list"
+                  hint="Odemkne osobní todolist na den (/den) — jeden napříč všemi firmami. Ráno ho můžou plnit agenti přes MCP, z položky jde udělat karta."
+                  initial={member.can_daylist ?? false}
+                  onSaved={load}
+                />
               </>
             )}
           </div>
@@ -683,6 +693,7 @@ function MemberFlagToggle({
     | "notify_enabled"
     | "can_hr"
     | "can_notes"
+    | "can_daylist"
     | "time_only"
     | "percent_report";
   title: string;

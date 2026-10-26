@@ -184,6 +184,7 @@ const MEMBER_FLAGS = new Set<string>([
   "notify_enabled",
   "can_hr",
   "can_notes",
+  "can_daylist",
   "time_only",
   "percent_report",
 ]);
@@ -201,6 +202,7 @@ export async function setMemberFlag(
     | "notify_enabled"
     | "can_hr"
     | "can_notes"
+    | "can_daylist"
     | "time_only"
     | "percent_report",
   value: boolean

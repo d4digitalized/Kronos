@@ -31,6 +31,7 @@ uživatel v aplikaci.
 | **Kontakt / duch** | Externí člověk bez účtu. Lze na něj čekat nebo ho dát jako řešitele; nic nevidí, neodstává notifikace, odškrtává za něj zadavatel. |
 | **Výkaz času** | Záznam od–do na projekt (a volitelně úkol) s popisem. Timer = otevřený záznam; jeden běžící na uživatele. |
 | **Inbox** | Úkoly bez projektu / k roztřídění. |
+| **Denní list** (`/den`) | Osobní todolist na den **mimo karty** — „nákupní seznam" napříč firmami. Položky s časem = Naplánované, bez času = Ostatní. Nedodělané se samy přenáší na další den. Karty naplánované v Mém dni se v něm ukazují také. Z položky si uživatel jedním klikem udělá kartu v Inboxu. Odemyká admin (`can_daylist`). |
 
 ## Jak to Jan používá
 
@@ -72,6 +73,12 @@ uživatel v aplikaci.
 - `add_time_entry(date, from, to, task_id | project_id | workspace_id, description?)`.
 - `list_time_entries(from, to, workspace_id?, user_id?, project_id?, summary_only?)` — součty po lidech, projektech a jejich kombinaci + záznamy. Vidíš své; admin všechny; HR s grantem.
 
+### Denní list
+- `list_day(date?)` — položky dne (u dneška i přenesené, `carried_from`) a karty naplánované v Mém dni (`planned_tasks`, jen ke čtení — dokončují se `complete_task`).
+- `add_day_items(date?, items[])` — každá položka `title`, volitelně `time` (HH:MM → Naplánované), `note` (kontext / proč), `link_url` (https:// nebo mailto:), `link_label` (mail, kalendář, Kronos…).
+- `update_day_item(item_id, title?, time?, note?, link_url?, link_label?, date?, done?)` — prázdný řetězec hodnotu smaže; `date` položku přesune.
+- `remove_day_item(item_id)`.
+
 ## Pravidla pro agenta
 
 1. **Nejdřív identita a kontext**: `whoami`, `list_workspaces`, `list_projects`. Neodhaduj ID — vždy je dohledej.
@@ -83,6 +90,7 @@ uživatel v aplikaci.
 7. **Čas**: před `start_timer` se podívej na `current_timer` (start zastaví předchozí). Ruční zápis jen na výslovnou žádost.
 8. **Chyby oprávnění** (nenalezen / nemáš přístup) neobcházej — znamená to, že uživatel to nesmí nebo nevidí. Ohlas to.
 9. **Odpovědi drž stručné** a pojmenované: název úkolu, projekt, kdo, do kdy. ID uváděj jen když je uživatel potřebuje.
+10. **Denní list ≠ karty**: do listu piš drobnosti na den (zavolat, odpovědět, vyzvednout). Práci, která potřebuje řešitele, projekt nebo termín, zakládej jako kartu. Před `add_day_items` vždy `list_day` — nepřidávej, co už tam je (ani přenesené ze včerejška).
 
 ## Typické postupy
 
@@ -91,6 +99,7 @@ uživatel v aplikaci.
 - **„Co dnes dělat"** → `list_my_tasks` (termíny), `current_timer`; případně `plan_task`.
 - **„Kolik kdo tento týden odpracoval"** → `list_time_entries(from, to, summary_only=true)`.
 - **„Označ X jako hotové a napiš komentář"** → `complete_task` → `add_comment`.
+- **Ranní příprava dne** → `list_day` (co už tam je, co přešlo ze včerejška, co je naplánované v Mém dni) → z mailů, kalendáře a termínů vyber, co je dnes potřeba → `add_day_items` (s časem jen to, co opravdu na čas je; do `note` proč, do `link_url` zdroj).
 
 ## Poznámky k připojení
 

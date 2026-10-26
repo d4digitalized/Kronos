@@ -69,6 +69,7 @@ export function buildNavSections(
   canTaskforce = false,
   canNotes = false,
   timeOnly = false,
+  canDaylist = false,
 ): NavSection[] {
   // „jen měření času": osekané rozhraní — pouze Report (timer žije v liště)
   if (timeOnly) {
@@ -87,6 +88,10 @@ export function buildNavSections(
         { href: `/w/${wsId}/priority`, label: "Priority list", icon: "list" },
         // Můj den — agenda naplánovaných oken napříč firmami
         { href: `/w/${wsId}/day`, label: "Můj den", icon: "calendar" },
+        // Denní list — samostatná obrazovka mimo firmu (/den), jen komu to admin zapnul
+        ...(canDaylist
+          ? [{ href: "/den", label: "Denní list", icon: "check" as const }]
+          : []),
         // Poznámky — osobní scratchpad, jen komu to admin zapnul
         ...(canNotes
           ? [

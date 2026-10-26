@@ -27,6 +27,18 @@
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
   --font-display: var(--font-display);
+
+  /* Denní list (/den) — vědomě jiný vzhled než aplikace: papír, inkoust,
+     jediný akcent jen na hlavní tlačítko. Písma nastavuje app/den/layout. */
+  --color-day-bg: #fafaf8;
+  --color-day-ink: #17191c;
+  --color-day-muted: #5f656c;
+  --color-day-faint: #8a8f96;
+  --color-day-line: #e6e6e1;
+  --color-day-brass: #9a5a0a;
+  --color-day-accent: #2f5bd3;
+  --font-day-display: var(--font-day-display);
+  --font-day-body: var(--font-day-body);
 }
 
 body {

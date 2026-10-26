@@ -41,6 +41,8 @@ export type Membership = {
   can_hr?: boolean;
   /** osobní poznámky v Masteru; default vypnuto všem. Nastavuje admin. */
   can_notes?: boolean;
+  /** denní list (/den) — jeden napříč firmami, stačí zapnout v jedné. Nastavuje admin. */
+  can_daylist?: boolean;
   /** „jen měření času" — osekané rozhraní: pouze timer a Report. Nastavuje admin. */
   time_only?: boolean;
   /** denní výkaz v % (8h den) místo timeru; zahrnuje osekané rozhraní. Nastavuje admin. */
@@ -110,6 +112,36 @@ export type Task = {
   triaged_at?: string | null;
   projects?: { name: string; position?: number };
   board_columns?: { name: string } | null;
+};
+
+/** Položka denního listu (/den) — mimo karty, soukromá, napříč firmami. */
+export type DayItem = {
+  id: string;
+  user_id: string;
+  /** YYYY-MM-DD, den v Europe/Prague */
+  day: string;
+  /** „HH:MM:SS" → Naplánované; null → Ostatní */
+  at: string | null;
+  title: string;
+  note: string;
+  link_url: string | null;
+  link_label: string | null;
+  source: "me" | "agent";
+  done_at: string | null;
+  /** převedeno na kartu (karta vznikla v Inboxu firmy) */
+  task_id: string | null;
+  created_at: string;
+  tasks?: { workspaces: { name: string } | null } | null;
+};
+
+/** Karta naplánovaná v Mém dni — v denním listu mezi Naplánovanými. */
+export type PlannedCard = Pick<
+  Task,
+  "id" | "title" | "planned_start" | "planned_end" | "completed_at" | "workspace_id"
+> & {
+  workspaces?: { name: string } | null;
+  projects?: { name: string } | null;
+  task_assignees?: { user_id: string }[];
 };
 
 export type Label = {

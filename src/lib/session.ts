@@ -72,6 +72,8 @@ export type WsContext = {
   /** smí zadávat i jiným: admin / aspoň jeden grant */
   canTaskforce: boolean;
   canNotes: boolean;
+  /** denní list (/den) — jeden napříč firmami, stačí flag v kterékoli */
+  canDaylist: boolean;
   /** výkaz v % místo timeru (adminům se flag ignoruje) */
   percentReport: boolean;
   /** „jen měření času" — osekané rozhraní (adminům se flag ignoruje) */
@@ -126,6 +128,7 @@ export const getWsContext = cache(
     const canHide = isAdmin || !!membership?.can_hide;
     const canTaskforce = isAdmin || (grantCount ?? 0) > 0;
     const canNotes = !!membership?.can_notes;
+    const canDaylist = all.some((m) => !!m.can_daylist);
     const percentReport = !isAdmin && !!membership?.percent_report;
     const timeOnly = (!isAdmin && !!membership?.time_only) || percentReport;
 
@@ -159,6 +162,7 @@ export const getWsContext = cache(
       canHide,
       canTaskforce,
       canNotes,
+      canDaylist,
       percentReport,
       timeOnly,
       wsOptions,

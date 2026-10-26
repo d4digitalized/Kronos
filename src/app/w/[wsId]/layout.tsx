@@ -28,6 +28,7 @@ export default async function WorkspaceLayout({
     canDelegate,
     canTaskforce,
     canNotes,
+    canDaylist,
     percentReport,
     timeOnly,
     wsOptions,
@@ -45,6 +46,7 @@ export default async function WorkspaceLayout({
         canDelegate={canDelegate}
         canTaskforce={canTaskforce}
         canNotes={canNotes}
+        canDaylist={canDaylist}
         timeOnly={timeOnly}
         userId={user.id}
         userName={userName}
@@ -73,6 +75,7 @@ export default async function WorkspaceLayout({
         canDelegate={canDelegate}
         canTaskforce={canTaskforce}
         canNotes={canNotes}
+        canDaylist={canDaylist}
         timeOnly={timeOnly}
         userId={user.id}
         userName={userName}

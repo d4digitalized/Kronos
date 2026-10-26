@@ -5,6 +5,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { syncTaskCalendarCore } from "@/lib/calendarSync";
 import { posBetween } from "@/lib/position";
 import { entrySeconds } from "@/lib/format";
+import { hhmm, loadPlannedCards, pragueToday, queryDayItems } from "@/lib/dayList";
+import type { DayItem } from "@/lib/types";
 
 /** Datum+čas v Europe/Prague → UTC Date (server běží v UTC; respektuje
     letní/zimní čas daného dne). */
@@ -106,6 +108,34 @@ async function findOrCreateContact(
   if (error || !created)
     return { error: "Kontakt se nepodařilo založit: " + (error?.message ?? "") };
   return { id: created.id as string, created: true };
+}
+
+/** Denní list je osobní nástroj za flagem can_daylist (stačí v jedné firmě).
+    Vrací důvod odmítnutí, nebo null. */
+async function daylistLocked(
+  client: ReturnType<typeof createUserClient>,
+  userId: string
+): Promise<string | null> {
+  const { data, error } = await client
+    .from("workspace_members")
+    .select("workspace_id")
+    .eq("user_id", userId)
+    .eq("can_daylist", true)
+    .limit(1);
+  if (error)
+    return error.code === "42703"
+      ? "Denní list v databázi ještě není (migrace 0053)."
+      : error.message;
+  return data?.length
+    ? null
+    : "Denní list nemá uživatel zapnutý — odemyká ho admin firmy ve Členové → Denní list.";
+}
+
+const LINK_RE = /^(https?:\/\/|mailto:)/i;
+
+/** „HH:MM" se smysluplnými hodinami a minutami. */
+function validTime(t: string): boolean {
+  return TIME_RE.test(t) && Number(t.slice(0, 2)) <= 23 && Number(t.slice(3)) <= 59;
 }
 
 const ok = (data: unknown) => ({
@@ -1424,6 +1454,236 @@ export function registerTools(server: McpServer): void {
         .single();
       if (error) return fail("Komentář se nepodařilo přidat: " + error.message);
       return ok({ comment_id: data.id, task_id });
+    }
+  );
+
+  // -------------------------------------------------------- denní list
+  // Osobní todolist na den (/den, tabulka day_items, migrace 0053) — mimo
+  // karty Kronosu, jeden napříč firmami. Agent sem ráno píše, co má uživatel
+  // ten den udělat; přes den si do něj uživatel připisuje sám.
+
+  server.registerTool(
+    "list_day",
+    {
+      title: "Denní list",
+      description:
+        "Denní list uživatele (/den) na daný den: vlastní položky (u dneška i nedodělané ze starších dnů — carried_from) a karty Kronosu naplánované na ten den v Mém dni (planned_tasks, jen pro čtení; dokončují se přes complete_task). Před add_day_items se podívej, co už v listu je, ať nevznikají duplicity.",
+      inputSchema: {
+        date: z
+          .string()
+          .optional()
+          .describe("YYYY-MM-DD; výchozí dnešek (Europe/Prague)"),
+      },
+    },
+    async ({ date }, extra) => {
+      const { client, userId } = clientFor(extra);
+      const locked = await daylistLocked(client, userId);
+      if (locked) return fail(locked);
+      const today = pragueToday();
+      const day = date?.trim() || today;
+      if (!DATE_RE.test(day)) return fail("Formát data: YYYY-MM-DD.");
+      const start = pragueDate(day, "00:00").toISOString();
+      const end = pragueDate(nextDay(day), "00:00").toISOString();
+      const [itemsRes, cardsRes] = await Promise.all([
+        queryDayItems(client, userId, day, today, start),
+        loadPlannedCards(client, userId, start, end),
+      ]);
+      if (itemsRes.error) return fail(itemsRes.error.message);
+      if (cardsRes.error) return fail(cardsRes.error);
+      const items = (itemsRes.data ?? []) as DayItem[];
+      return ok({
+        date: day,
+        items: items.map((i) => {
+          const carried = i.day < day;
+          return {
+            id: i.id,
+            // přenesená položka čas ztrácí (v listu je mezi Ostatními)
+            time: carried ? null : hhmm(i.at),
+            title: i.title,
+            note: i.note || undefined,
+            link_url: i.link_url ?? undefined,
+            link_label: i.link_label ?? undefined,
+            source: i.source,
+            done: !!i.done_at,
+            carried_from: carried ? i.day : undefined,
+            card_task_id: i.task_id ?? undefined,
+          };
+        }),
+        planned_tasks: cardsRes.cards.map((t) => ({
+          task_id: t.id,
+          title: t.title,
+          from: pragueStamp(t.planned_start ?? null)?.slice(11),
+          to: pragueStamp(t.planned_end ?? null)?.slice(11),
+          workspace: t.workspaces?.name ?? null,
+          project: t.projects?.name ?? null,
+          done: !!t.completed_at,
+        })),
+      });
+    }
+  );
+
+  server.registerTool(
+    "add_day_items",
+    {
+      title: "Přidat do denního listu",
+      description:
+        "Přidá položky do denního listu uživatele (/den) — typicky ráno: co má ten den udělat. Položka s časem jde mezi Naplánované (řazené podle času), bez času mezi Ostatní. Text krátký a akční; kontext a důvod patří do note, zdroj (mail, karta, kalendář) do link_url. Nejsou to karty Kronosu — kartu si z položky udělá uživatel sám. Nedodělané z minulých dnů se přenáší samy, znovu je nepřidávej.",
+      inputSchema: {
+        date: z
+          .string()
+          .optional()
+          .describe("YYYY-MM-DD; výchozí dnešek (Europe/Prague)"),
+        items: z
+          .array(
+            z.object({
+              title: z.string().describe("co udělat, jedna krátká věta"),
+              time: z
+                .string()
+                .optional()
+                .describe("HH:MM (Europe/Prague) → sekce Naplánované"),
+              note: z
+                .string()
+                .optional()
+                .describe("krátký kontext / proč — šedý řádek pod položkou"),
+              link_url: z
+                .string()
+                .optional()
+                .describe("odkaz na zdroj: https://… nebo mailto:"),
+              link_label: z
+                .string()
+                .optional()
+                .describe("krátký popisek odkazu, např. mail, kalendář, Kronos"),
+            })
+          )
+          .min(1)
+          .max(30),
+      },
+    },
+    async ({ date, items }, extra) => {
+      const { client, userId } = clientFor(extra);
+      const locked = await daylistLocked(client, userId);
+      if (locked) return fail(locked);
+      const day = date?.trim() || pragueToday();
+      if (!DATE_RE.test(day)) return fail("Formát data: YYYY-MM-DD.");
+
+      const rows = [];
+      for (const [n, it] of items.entries()) {
+        const title = it.title.trim();
+        if (!title) return fail(`Položka ${n + 1}: prázdný text.`);
+        const time = it.time?.trim() || null;
+        if (time && !validTime(time)) return fail(`Položka ${n + 1}: čas ve formátu HH:MM.`);
+        const link = it.link_url?.trim() || null;
+        if (link && !LINK_RE.test(link))
+          return fail(`Položka ${n + 1}: odkaz musí začínat https://, http:// nebo mailto:.`);
+        rows.push({
+          user_id: userId,
+          day,
+          at: time,
+          title,
+          note: it.note?.trim() ?? "",
+          link_url: link,
+          link_label: it.link_label?.trim() || null,
+          source: "agent",
+        });
+      }
+      const { data, error } = await client
+        .from("day_items")
+        .insert(rows)
+        .select("id, title, at");
+      if (error) return fail("Položky se nepodařilo přidat: " + error.message);
+      return ok({
+        date: day,
+        added: (data ?? []).map((r) => ({ id: r.id, title: r.title, time: hhmm(r.at) })),
+      });
+    }
+  );
+
+  server.registerTool(
+    "update_day_item",
+    {
+      title: "Upravit položku denního listu",
+      description:
+        "Změní položku denního listu: text, čas, poznámku, odkaz, přesune ji na jiný den nebo ji odškrtne / vrátí. Měň jen to, co zadáš. id položky je z list_day nebo add_day_items.",
+      inputSchema: {
+        item_id: z.string(),
+        title: z.string().optional(),
+        time: z
+          .string()
+          .optional()
+          .describe("HH:MM; prázdný řetězec čas smaže (→ Ostatní)"),
+        note: z.string().optional().describe("prázdný řetězec poznámku smaže"),
+        link_url: z.string().optional().describe("prázdný řetězec odkaz smaže"),
+        link_label: z.string().optional(),
+        date: z.string().optional().describe("přesun na jiný den, YYYY-MM-DD"),
+        done: z.boolean().optional().describe("true = odškrtnout, false = vrátit"),
+      },
+    },
+    async ({ item_id, title, time, note, link_url, link_label, date, done }, extra) => {
+      const { client, userId } = clientFor(extra);
+      const locked = await daylistLocked(client, userId);
+      if (locked) return fail(locked);
+
+      const patch: Record<string, unknown> = {};
+      if (title !== undefined) {
+        if (!title.trim()) return fail("Text položky nesmí být prázdný.");
+        patch.title = title.trim();
+      }
+      if (time !== undefined) {
+        const t = time.trim();
+        if (t && !validTime(t)) return fail("Čas ve formátu HH:MM.");
+        patch.at = t || null;
+      }
+      if (note !== undefined) patch.note = note.trim();
+      if (link_url !== undefined) {
+        const l = link_url.trim();
+        if (l && !LINK_RE.test(l))
+          return fail("Odkaz musí začínat https://, http:// nebo mailto:.");
+        patch.link_url = l || null;
+      }
+      if (link_label !== undefined) patch.link_label = link_label.trim() || null;
+      if (date !== undefined) {
+        if (!DATE_RE.test(date.trim())) return fail("Formát data: YYYY-MM-DD.");
+        patch.day = date.trim();
+      }
+      if (done !== undefined) patch.done_at = done ? new Date().toISOString() : null;
+      if (!Object.keys(patch).length) return fail("Nic ke změně.");
+
+      const { data, error } = await client
+        .from("day_items")
+        .update(patch)
+        .eq("id", item_id)
+        .select("id, day, at, title, done_at")
+        .single();
+      if (error || !data) return fail("Položka nenalezena.");
+      return ok({
+        id: data.id,
+        date: data.day,
+        time: hhmm(data.at),
+        title: data.title,
+        done: !!data.done_at,
+      });
+    }
+  );
+
+  server.registerTool(
+    "remove_day_item",
+    {
+      title: "Smazat položku denního listu",
+      description: "Smaže položku z denního listu uživatele.",
+      inputSchema: { item_id: z.string() },
+    },
+    async ({ item_id }, extra) => {
+      const { client, userId } = clientFor(extra);
+      const locked = await daylistLocked(client, userId);
+      if (locked) return fail(locked);
+      const { data, error } = await client
+        .from("day_items")
+        .delete()
+        .eq("id", item_id)
+        .select("id");
+      if (error) return fail(error.message);
+      if (!data?.length) return fail("Položka nenalezena.");
+      return ok({ removed: item_id });
     }
   );
 }

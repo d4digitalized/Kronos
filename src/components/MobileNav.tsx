@@ -27,6 +27,7 @@ export default function MobileNav({
   canDelegate = false,
   canTaskforce = false,
   canNotes = false,
+  canDaylist = false,
   timeOnly = false,
   userId,
   userName,
@@ -40,6 +41,7 @@ export default function MobileNav({
   canDelegate?: boolean;
   canTaskforce?: boolean;
   canNotes?: boolean;
+  canDaylist?: boolean;
   timeOnly?: boolean;
   userId?: string;
   userName: string;
@@ -60,7 +62,8 @@ export default function MobileNav({
     canDelegate,
     canTaskforce,
     canNotes,
-    timeOnly
+    timeOnly,
+    canDaylist
   );
   const isActive = (href: string) => isNavActive(pathname, href, wsId);
 
