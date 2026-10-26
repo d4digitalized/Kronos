@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Familjen_Grotesk, Geist, Geist_Mono } from "next/font/google";
 import Toaster from "@/components/Toaster";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import SessionWatcher from "@/components/SessionWatcher";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -47,6 +48,7 @@ export default function RootLayout({
         {children}
         <Toaster />
         <ConfirmDialog />
+        <SessionWatcher />
       </body>
     </html>
   );

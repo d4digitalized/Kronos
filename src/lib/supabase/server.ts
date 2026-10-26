@@ -1,6 +1,9 @@
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { cache } from "react";
+import { resilientFetch } from "@/lib/supabase/fetch";
+
+const authFetch = resilientFetch(5_000);
 
 // Memoizováno na požadavek (React cache): layout i stránka sdílí jednoho
 // klienta, a hlavně sdílí výsledek getClaims()/getSession() uvnitř něj.
@@ -11,6 +14,7 @@ export const createClient = cache(async () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      global: { fetch: authFetch },
       cookies: {
         getAll() {
           return cookieStore.getAll();

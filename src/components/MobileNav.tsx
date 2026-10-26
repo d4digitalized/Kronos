@@ -97,7 +97,8 @@ export default function MobileNav({
 
   async function logout() {
     const supabase = createClient();
-    await supabase.auth.signOut();
+    // jen toto zařízení — výchozí „global" odhlásí i počítač a ostatní prohlížeče
+    await supabase.auth.signOut({ scope: "local" });
     cacheClear(); // ať se data neukážou dalšímu přihlášenému v téže záložce
     router.push("/login");
     router.refresh();

@@ -1,6 +1,8 @@
 import { cache } from "react";
+import { headers } from "next/headers";
 import { isAuthRetryableFetchError, type SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import { AUTH_UNAVAILABLE_HEADER } from "@/lib/supabase/fetch";
 import { staticJwks } from "@/lib/jwks";
 import type { Membership, Profile, Workspace, WorkspaceOption } from "@/lib/types";
 
@@ -20,6 +22,8 @@ export type SessionUser = {
   googleLinked: boolean;
 };
 
+const AUTH_UNAVAILABLE = "Přihlášení se teď nepodařilo ověřit (spojení se Supabase).";
+
 /** Ověří session z cookies bez cesty na Supabase Auth (u HS256 tokenů
     knihovna sama spadne zpět na getUser). */
 export async function readSessionUser(
@@ -32,8 +36,7 @@ export async function readSessionUser(
   );
   // výpadek spojení se Supabase ≠ odhlášení: vyhodit chybu (error.tsx nabídne
   // „Zkusit znovu") místo přesměrování na přihlášení
-  if (error && isAuthRetryableFetchError(error))
-    throw new Error("Přihlášení se teď nepodařilo ověřit (spojení se Supabase).");
+  if (error && isAuthRetryableFetchError(error)) throw new Error(AUTH_UNAVAILABLE);
   const claims = data?.claims;
   if (!claims?.sub) return null;
   const meta = claims.app_metadata as { providers?: string[] } | undefined;
@@ -46,6 +49,8 @@ export async function readSessionUser(
 
 /** Přihlášený uživatel — sdílený v rámci požadavku. */
 export const getSessionUser = cache(async (): Promise<SessionUser | null> => {
+  // proxy obnovu tokenu už zkoušel a Auth neodpověděl — neopakovat
+  if ((await headers()).has(AUTH_UNAVAILABLE_HEADER)) throw new Error(AUTH_UNAVAILABLE);
   const supabase = await createClient();
   return readSessionUser(supabase);
 });

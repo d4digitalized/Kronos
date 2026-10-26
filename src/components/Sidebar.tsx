@@ -62,7 +62,8 @@ export default function Sidebar({
 
   async function logout() {
     const supabase = createClient();
-    await supabase.auth.signOut();
+    // jen toto zařízení — výchozí „global" odhlásí i telefon a ostatní prohlížeče
+    await supabase.auth.signOut({ scope: "local" });
     cacheClear(); // ať se data neukážou dalšímu přihlášenému v téže záložce
     router.push("/login");
     router.refresh();

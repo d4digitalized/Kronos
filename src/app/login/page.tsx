@@ -2,6 +2,7 @@
 
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { isAuthRetryableFetchError } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/client";
 import { safeNextPath } from "@/lib/safeNext";
 
@@ -10,6 +11,7 @@ function LoginForm() {
   const searchParams = useSearchParams();
   const linkError = searchParams.get("error") === "link";
   const oauthError = searchParams.get("error") === "oauth";
+  const signedOut = searchParams.get("signedout") === "1";
   // návrat po přihlášení — jen vlastní cesta, ať to nejde zneužít k open redirectu
   const dest = safeNextPath(searchParams.get("next"));
 
@@ -26,7 +28,11 @@ function LoginForm() {
     const supabase = createClient();
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) {
-      setError("Přihlášení se nezdařilo. Zkontroluj e-mail a heslo.");
+      setError(
+        isAuthRetryableFetchError(error)
+          ? "Přihlášení teď nejde ověřit (výpadek spojení). Zkus to za chvíli znovu."
+          : "Přihlášení se nezdařilo. Zkontroluj e-mail a heslo."
+      );
       setLoading(false);
       return;
     }
@@ -102,6 +108,11 @@ function LoginForm() {
         <p className="rounded-lg bg-amber-50 p-2 text-sm text-amber-800">
           Odkaz z e-mailu už není platný. Přihlas se, požádej o novou pozvánku,
           nebo si nech poslat odkaz pro nastavení hesla.
+        </p>
+      )}
+      {signedOut && !linkError && !oauthError && !isReset && (
+        <p className="rounded-lg bg-amber-50 p-2 text-sm text-amber-800">
+          Byl jsi odhlášen. Po přihlášení se vrátíš tam, kde jsi skončil.
         </p>
       )}
       {oauthError && !isReset && (
