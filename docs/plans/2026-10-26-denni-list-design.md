@@ -92,7 +92,9 @@ Jeden člověk s účtem na každou firmu (DENULAR, proStavaře, Office) vidí
   SQL — tabulka nemá policy pro zápis, jinak by si kdokoli připojil cizí
   soukromý list.
 - **Výchozí firma** nové položky = firma vlastníka skupiny (u Jana Office);
-  po přidání se výběr vrací na ni. Vlaječky a výběr jen když je firem víc.
+  po přidání se výběr vrací na ni. Firma jde změnit i později v `⋯`.
+  Vlaječka je jen název firmy (bez barev); vlaječky a výběr jen když je
+  firem víc.
 - **Karty z Mého dne všech účtů** (`daylist_planned_cards`) — výběr jako
   Můj den a jen karty, které by daný účet viděl i sám. **Odškrtnout jdou
   z kteréhokoli účtu** (`daylist_set_card_done`): zapíše se pod účtem, kterému

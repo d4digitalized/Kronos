@@ -23,10 +23,7 @@ import {
 } from "@/lib/dayList";
 import type { DayFirm, DayItem, PlannedCard } from "@/lib/types";
 
-// barvy vlaječek firem (odlišné i světlostí, ne jen odstínem)
-const FIRM_COLORS = ["#2f5bd3", "#c2410c", "#0e7569", "#7c3aed", "#a16207"];
-
-type Firm = { name: string; color: string };
+type Firm = { name: string };
 
 /** Půlnoc dne v místním čase jako ISO (hranice pro done_at / planned_start). */
 function dayStartISO(day: string): string {
@@ -88,13 +85,9 @@ export default function DayListView({
   // vlaječky jen když je z čeho vybírat
   const showFirms = firms.length > 1;
   const firmById = new Map<string, Firm>(
-    firms.map((f, i) => [
-      f.workspace_id,
-      { name: f.name, color: FIRM_COLORS[i % FIRM_COLORS.length] },
-    ])
+    firms.map((f) => [f.workspace_id, { name: f.name }])
   );
-  const firmOf = (id: string): Firm =>
-    firmById.get(id) ?? { name: "?", color: "var(--color-day-faint)" };
+  const firmOf = (id: string): Firm => firmById.get(id) ?? { name: "?" };
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
@@ -185,6 +178,20 @@ export default function DayListView({
     setItems((list) => [...list, data as DayItem]);
     setDraft("");
     setAddFirm(homeFirm); // výchozí je vždy domovská firma
+  }
+
+  /** Jiná firma položky — vlastníka (účet té firmy) přepíše DB sama. */
+  async function changeFirm(item: DayItem, workspaceId: string) {
+    if (workspaceId === item.workspace_id) return;
+    patchItem(item.id, { workspace_id: workspaceId });
+    const { error } = await supabase
+      .from("day_items")
+      .update({ workspace_id: workspaceId })
+      .eq("id", item.id);
+    if (error) {
+      patchItem(item.id, { workspace_id: item.workspace_id });
+      toast("Firmu se nepodařilo změnit.", "error");
+    }
   }
 
   async function moveToTomorrow(item: DayItem) {
@@ -362,12 +369,7 @@ export default function DayListView({
             <Icon d="M12 5v14M5 12h14" size={20} />
           </span>
           {showFirms && (
-            <span className="flex shrink-0 items-center gap-1.5 pr-2">
-              <span
-                aria-hidden
-                className="size-2 rounded-full"
-                style={{ backgroundColor: firmOf(addFirm).color }}
-              />
+            <span className="flex shrink-0 items-center pr-2">
               <label htmlFor="day-firm" className="sr-only">
                 Firma
               </label>
@@ -479,6 +481,8 @@ export default function DayListView({
                               : null
                           }
                           promoteElsewhere={firmOf(row.item.workspace_id).name}
+                          firmOptions={showFirms ? firms : null}
+                          onFirm={changeFirm}
                           onTomorrow={isToday ? moveToTomorrow : null}
                           onRemove={remove}
                         />
@@ -568,6 +572,8 @@ function ItemRowView({
   onMenu,
   onPromote,
   promoteElsewhere,
+  firmOptions,
+  onFirm,
   onTomorrow,
   onRemove,
 }: {
@@ -581,6 +587,9 @@ function ItemRowView({
   onPromote: ((item: DayItem) => void) | null;
   /** název firmy položky — do hlášky, kde kartu založit */
   promoteElsewhere: string;
+  /** firmy na výběr; null = jediná firma, není co měnit */
+  firmOptions: DayFirm[] | null;
+  onFirm: (item: DayItem, workspaceId: string) => void;
   onTomorrow: ((item: DayItem) => void) | null;
   onRemove: (item: DayItem) => void;
 }) {
@@ -618,6 +627,22 @@ function ItemRowView({
                 <Icon d="M7 17L17 7M8 7h9v9" size={15} />
                 Udělat kartu v Kronosu
               </button>
+            )}
+            {firmOptions && (
+              <label className="inline-flex h-11 items-center gap-1.5 rounded-full border border-day-line px-4 text-sm hover:border-day-ink">
+                <span className="text-day-muted">Firma</span>
+                <select
+                  value={item.workspace_id}
+                  onChange={(e) => onFirm(item, e.target.value)}
+                  className="bg-transparent font-medium"
+                >
+                  {firmOptions.map((f) => (
+                    <option key={f.workspace_id} value={f.workspace_id}>
+                      {f.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
             )}
             {onTomorrow && (
               <button onClick={() => onTomorrow(item)} className={PILL}>
@@ -814,12 +839,7 @@ function PastRowView({ row, done }: { row: Row; done: boolean }) {
 // ------------------------------------------------------------- drobnosti
 
 function FirmTag({ firm }: { firm: Firm }) {
-  return (
-    <span className="inline-flex items-center gap-1">
-      <span aria-hidden className="size-2 rounded-full" style={{ backgroundColor: firm.color }} />
-      {firm.name}
-    </span>
-  );
+  return <span>{firm.name}</span>;
 }
 
 function ItemLink({ item }: { item: DayItem }) {
