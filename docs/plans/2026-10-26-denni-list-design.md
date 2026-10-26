@@ -101,8 +101,12 @@ Jeden člověk s účtem na každou firmu (DENULAR, proStavaře, Office) vidí
   karta patří (dočasně přepnuté `auth.uid()`), takže historie, notifikace i
   opakování vidí jako aktéra člena té firmy. Otevřít kartu jde jen účtem,
   který je ve firmě.
-- **Převod na kartu** jde do firmy z vlaječky; založit ji smí jen účet
-  z té firmy — jinak hláška „založíš, když tu budeš přihlášený jejím účtem".
+- **Převod na kartu** jde do firmy z vlaječky **z kteréhokoli účtu**
+  (`daylist_promote_item`, migrace 0055): karta vznikne pod účtem firmy
+  položky (autor = člen té firmy) a položka se v téže transakci odškrtne.
+  Otevřít ji odkazem jde jen účtem, který je ve firmě.
+- **Výběr firmy** je vlastní malá nabídka (ne nativní `<select>`), u pole
+  i v `⋯`; akce v `⋯` jsou drobná obrysová tlačítka na jednom řádku.
 
 ## MCP pro agenty
 

@@ -18,6 +18,7 @@ import {
   linkLabel,
   loadPlannedCards,
   parseTimePrefix,
+  promoteItem,
   queryDayItems,
   setCardDone,
 } from "@/lib/dayList";
@@ -53,7 +54,6 @@ export default function DayListView({
   today,
   firms,
   mineIds,
-  creatableIds,
 }: {
   day: string;
   today: string;
@@ -61,8 +61,6 @@ export default function DayListView({
   firms: DayFirm[];
   /** firmy přihlášeného účtu — karty v nich jde otevřít */
   mineIds: string[];
-  /** firmy, kam přihlášený účet smí zakládat karty */
-  creatableIds: string[];
 }) {
   const supabase = createClient();
   const [items, setItems] = useState<DayItem[]>([]);
@@ -219,39 +217,19 @@ export default function DayListView({
     }
   }
 
-  /** Karta v Inboxu firmy položky; položka se odškrtne a odkáže na ni. */
+  /** Karta v Inboxu firmy položky — z kteréhokoli účtu (vznikne pod účtem
+      té firmy); položka se odškrtne a odkáže na ni. */
   async function promote(item: DayItem, title: string): Promise<boolean> {
-    const firm = firmOf(item.workspace_id);
-    const description = [item.note, item.link_url].filter(Boolean).join("\n\n");
-    const { data: task, error } = await supabase
-      .from("tasks")
-      .insert({
-        workspace_id: item.workspace_id,
-        project_id: null,
-        column_id: null,
-        title,
-        description,
-        position: 0,
-      })
-      .select("id")
-      .single();
-    if (error || !task) {
-      toast("Kartu se nepodařilo založit.", "error");
+    const { taskId, error } = await promoteItem(supabase, item.id, title);
+    if (error || !taskId) {
+      // hlášky z DB začínají „Denní list: " — ty jsou srozumitelné
+      const known = error?.match(/Denní list: (.+)$/)?.[1];
+      toast(known ?? "Kartu se nepodařilo založit.", "error");
       return false;
     }
-    const done_at = new Date().toISOString();
-    const { error: linkError } = await supabase
-      .from("day_items")
-      .update({ done_at, task_id: task.id })
-      .eq("id", item.id);
-    if (linkError) {
-      toast("Karta vznikla, ale položku se nepodařilo odškrtnout.", "error");
-      load();
-      return true;
-    }
-    patchItem(item.id, { done_at, task_id: task.id as string });
+    patchItem(item.id, { done_at: new Date().toISOString(), task_id: taskId });
     setShowDone(true);
-    toast(`Karta je v Inboxu ${firm.name}.`);
+    toast(`Karta je v Inboxu ${firmOf(item.workspace_id).name}.`);
     return true;
   }
 
@@ -369,22 +347,13 @@ export default function DayListView({
             <Icon d="M12 5v14M5 12h14" size={20} />
           </span>
           {showFirms && (
-            <span className="flex shrink-0 items-center pr-2">
-              <label htmlFor="day-firm" className="sr-only">
-                Firma
-              </label>
-              <select
-                id="day-firm"
+            <span className="shrink-0 pr-2">
+              <FirmPicker
+                firms={firms}
                 value={addFirm}
-                onChange={(e) => setAddFirm(e.target.value)}
-                className="h-8 max-w-[9rem] bg-transparent text-[13px] font-medium text-day-muted hover:text-day-ink"
-              >
-                {firms.map((f) => (
-                  <option key={f.workspace_id} value={f.workspace_id}>
-                    {f.name}
-                  </option>
-                ))}
-              </select>
+                onChange={setAddFirm}
+                triggerClass="inline-flex h-8 items-center gap-1 rounded-md px-1 text-[13px] font-medium text-day-muted hover:text-day-ink"
+              />
             </span>
           )}
           <label htmlFor="day-new" className="sr-only">
@@ -472,15 +441,10 @@ export default function DayListView({
                           menuOpen={menuFor === row.item.id}
                           onToggle={toggleItem}
                           onMenu={(id) => setMenuFor((cur) => (cur === id ? null : id))}
-                          onPromote={
-                            creatableIds.includes(row.item.workspace_id)
-                              ? (item) => {
-                                  setMenuFor(null);
-                                  setPromoting(item);
-                                }
-                              : null
-                          }
-                          promoteElsewhere={firmOf(row.item.workspace_id).name}
+                          onPromote={(item) => {
+                            setMenuFor(null);
+                            setPromoting(item);
+                          }}
                           firmOptions={showFirms ? firms : null}
                           onFirm={changeFirm}
                           onTomorrow={isToday ? moveToTomorrow : null}
@@ -563,6 +527,9 @@ const TITLE = "break-words text-[17px] leading-[1.4]";
 const META =
   "mt-[3px] flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm leading-[1.4] text-day-muted";
 const PILL = "h-11 rounded-full border border-day-line px-4 text-sm hover:border-day-ink";
+/** drobné akce v ⋯ — vejdou se na jeden řádek, žádná nevyčnívá */
+const ACTION =
+  "inline-flex h-9 items-center gap-1 rounded-full border border-day-line px-3 text-[13px] hover:border-day-ink";
 
 function ItemRowView({
   row,
@@ -571,7 +538,6 @@ function ItemRowView({
   onToggle,
   onMenu,
   onPromote,
-  promoteElsewhere,
   firmOptions,
   onFirm,
   onTomorrow,
@@ -583,10 +549,7 @@ function ItemRowView({
   menuOpen: boolean;
   onToggle: (item: DayItem) => void;
   onMenu: (id: string) => void;
-  /** null = do firmy položky přihlášený účet karty nezakládá */
-  onPromote: ((item: DayItem) => void) | null;
-  /** název firmy položky — do hlášky, kde kartu založit */
-  promoteElsewhere: string;
+  onPromote: (item: DayItem) => void;
   /** firmy na výběr; null = jediná firma, není co měnit */
   firmOptions: DayFirm[] | null;
   onFirm: (item: DayItem, workspaceId: string) => void;
@@ -618,45 +581,27 @@ function ItemRowView({
           </p>
         )}
         {menuOpen && (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {onPromote && (
-              <button
-                onClick={() => onPromote(item)}
-                className="inline-flex h-11 items-center gap-1.5 rounded-full bg-day-ink px-4 text-sm font-medium text-day-bg"
-              >
-                <Icon d="M7 17L17 7M8 7h9v9" size={15} />
-                Udělat kartu v Kronosu
-              </button>
-            )}
+          <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+            <button onClick={() => onPromote(item)} className={ACTION}>
+              <Icon d="M7 17L17 7M8 7h9v9" size={13} />
+              Udělat kartu v Kronosu
+            </button>
             {firmOptions && (
-              <label className="inline-flex h-11 items-center gap-1.5 rounded-full border border-day-line px-4 text-sm hover:border-day-ink">
-                <span className="text-day-muted">Firma</span>
-                <select
-                  value={item.workspace_id}
-                  onChange={(e) => onFirm(item, e.target.value)}
-                  className="bg-transparent font-medium"
-                >
-                  {firmOptions.map((f) => (
-                    <option key={f.workspace_id} value={f.workspace_id}>
-                      {f.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <FirmPicker
+                firms={firmOptions}
+                value={item.workspace_id}
+                onChange={(id) => onFirm(item, id)}
+                triggerClass={ACTION}
+              />
             )}
             {onTomorrow && (
-              <button onClick={() => onTomorrow(item)} className={PILL}>
+              <button onClick={() => onTomorrow(item)} className={ACTION}>
                 Na zítra
               </button>
             )}
-            <button onClick={() => onRemove(item)} className={PILL}>
+            <button onClick={() => onRemove(item)} className={ACTION}>
               Smazat
             </button>
-            {!onPromote && (
-              <p className="basis-full text-[13px] text-day-muted">
-                Kartu do {promoteElsewhere} založíš, když tu budeš přihlášený jejím účtem.
-              </p>
-            )}
           </div>
         )}
       </div>
@@ -840,6 +785,90 @@ function PastRowView({ row, done }: { row: Row; done: boolean }) {
 
 function FirmTag({ firm }: { firm: Firm }) {
   return <span>{firm.name}</span>;
+}
+
+/** Výběr firmy — vlastní malá nabídka místo nativního <select> (ten
+    vypadá v každém prohlížeči jinak a ruší). Zavře ji výběr, klik mimo
+    i Esc. */
+function FirmPicker({
+  firms,
+  value,
+  onChange,
+  triggerClass,
+}: {
+  firms: DayFirm[];
+  value: string;
+  onChange: (workspaceId: string) => void;
+  triggerClass: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const current = firms.find((f) => f.workspace_id === value);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Firma: ${current?.name ?? "?"}`}
+        className={triggerClass}
+      >
+        {current?.name ?? "?"}
+        <span className={`transition-transform ${open ? "rotate-180" : ""}`}>
+          <Icon d="M6 9l6 6 6-6" size={13} />
+        </span>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Firma"
+          className="absolute left-0 top-full z-20 mt-1 flex w-max min-w-full flex-col rounded-xl border border-day-line bg-white p-1 shadow-[0_8px_24px_rgba(0,0,0,0.12)]"
+        >
+          {firms.map((f) => {
+            const selected = f.workspace_id === value;
+            return (
+              <button
+                key={f.workspace_id}
+                type="button"
+                role="menuitemradio"
+                aria-checked={selected}
+                onClick={() => {
+                  onChange(f.workspace_id);
+                  setOpen(false);
+                }}
+                className={`flex items-center justify-between gap-4 rounded-lg px-3 py-2 text-left text-[13px] hover:bg-day-bg ${
+                  selected ? "font-semibold" : ""
+                }`}
+              >
+                {f.name}
+                <span className={selected ? "" : "invisible"}>
+                  <Icon d="M5 12.5l4.5 4.5L19 7" size={13} strokeWidth={2.4} />
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ItemLink({ item }: { item: DayItem }) {

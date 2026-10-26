@@ -191,3 +191,19 @@ export async function setCardDone(
   if (error) return { completedAt: null, error: error.message };
   return { completedAt: (data as string | null) ?? null, error: null };
 }
+
+/** Položka → karta v Inboxu její firmy. Jde z kteréhokoli účtu skupiny
+    (karta vznikne pod účtem firmy položky); položka se odškrtne a odkáže
+    na kartu v téže transakci. Vrací id karty. */
+export async function promoteItem(
+  client: SupabaseClient,
+  itemId: string,
+  title: string
+): Promise<{ taskId: string | null; error: string | null }> {
+  const { data, error } = await client.rpc("daylist_promote_item", {
+    p_item_id: itemId,
+    p_title: title,
+  });
+  if (error) return { taskId: null, error: error.message };
+  return { taskId: data as string, error: null };
+}
